@@ -1,14 +1,16 @@
 """Data loading utilities."""
 
 from .dataloader import (
-    TinyStoriesDataset,
+    Batch,
+    ValidationDataset,
     create_dataloader,
     get_tokenizer,
 )
 
 __all__ = [
-    "TinyStoriesDataset",
-    "create_dataloader", 
+    "Batch",
+    "ValidationDataset",
+    "create_dataloader",
     "get_tokenizer",
 ]
 

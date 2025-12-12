@@ -110,10 +110,12 @@ class TernaryTransformer(nn.Module):
         self.embed = Embedding(config.vocab_size, config.d_model)
         
         # Transformer blocks
-        self.layers = [
-            TransformerBlock(config, layer_idx=i)
-            for i in range(config.n_layers)
-        ]
+        self.layers = []
+        for i in range(config.n_layers):
+            layer = TransformerBlock(config, layer_idx=i)
+            # Register each layer as an attribute so named_modules() can find it
+            setattr(self, f"layer_{i}", layer)
+            self.layers.append(layer)
         
         # Final normalization
         self.norm = RMSNorm(config.d_model)
@@ -307,41 +309,49 @@ class TernaryTransformer(nn.Module):
     
     def count_parameters(self) -> dict:
         """Count parameters by component."""
-        def count_module(module, prefix=""):
-            total = 0
-            breakdown = {}
-            
-            for name, param in module.parameters().items():
-                if isinstance(param, mx.array):
-                    count = param.size
-                    total += count
-                    breakdown[f"{prefix}{name}"] = count
-            
-            return total, breakdown
-        
         total = 0
         breakdown = {}
-        
-        # Embeddings
-        embed_count = self.embed.weight.size
-        total += embed_count
-        breakdown["embeddings"] = embed_count
-        
-        # Layers
-        layer_total = 0
-        for i, layer in enumerate(self.layers):
-            layer_count, _ = count_module(layer, f"layer_{i}.")
-            layer_total += layer_count
-        total += layer_total
-        breakdown["transformer_layers"] = layer_total
-        
-        # LM head
-        lm_head_count = self.lm_head.weight_int8.size
-        total += lm_head_count
-        breakdown["lm_head"] = lm_head_count
-        
+        seen = set()
+
+        # Traverse all modules and count their weights explicitly so we
+        # include ternary layers that don't expose parameters via
+        # module.parameters().
+        for name, module in self.named_modules():
+            if id(module) in seen:
+                continue
+            seen.add(id(module))
+
+            prefix = f"{name}." if name else ""
+
+            if isinstance(module, TernaryLinear):
+                w_count = module.weight_int8.size
+                total += w_count
+                breakdown[f"{prefix}weight"] = w_count
+
+                # Scales are small but stored alongside weights
+                scale_count = module.scale.size
+                total += scale_count
+                breakdown[f"{prefix}scale"] = scale_count
+
+                if module.bias is not None:
+                    b_count = module.bias.size
+                    total += b_count
+                    breakdown[f"{prefix}bias"] = b_count
+                continue
+
+            weight = getattr(module, "weight", None)
+            if isinstance(weight, mx.array):
+                w_count = weight.size
+                total += w_count
+                breakdown[f"{prefix}weight"] = w_count
+
+            bias = getattr(module, "bias", None)
+            if isinstance(bias, mx.array):
+                b_count = bias.size
+                total += b_count
+                breakdown[f"{prefix}bias"] = b_count
+
         breakdown["total"] = total
-        
         return breakdown
 
 

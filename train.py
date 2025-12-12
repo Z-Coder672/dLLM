@@ -13,17 +13,36 @@ import math
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 from datetime import datetime
+import logging
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from src.config import ModelConfig, TrainingConfig
 from src.model import TernaryTransformer, create_model
+from src.layers import TernaryLinear
 from src.optimizer import AdamW8bit, get_cosine_schedule_with_warmup, clip_gradients
 from src.checkpoint import save_checkpoint, load_checkpoint, get_latest_checkpoint
 from src.quantization import quantize_int8, dequantize_int8
 from src.ste import compute_ternary_stats
 from data.dataloader import create_dataloader, Batch, ValidationDataset
+def setup_logger(log_path: Path) -> logging.Logger:
+    """Configure a logger that logs to both stdout and a file."""
+    logger = logging.getLogger("train")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    
+    fmt = logging.Formatter("%(asctime)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+    
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+    logger.addHandler(stream_handler)
+    
+    file_handler = logging.FileHandler(log_path, mode="a")
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
+    
+    return logger
 
 
 def compute_loss(
@@ -60,7 +79,7 @@ def compute_loss(
     
     # Compute cross-entropy loss
     # Using log_softmax for numerical stability
-    log_probs = mx.log_softmax(logits_flat.astype(mx.float32), axis=-1)
+    log_probs = nn.log_softmax(logits_flat.astype(mx.float32), axis=-1)
     
     # Gather log probs for target tokens
     # labels_flat: (batch * seq_len,)
@@ -88,37 +107,28 @@ def get_trainable_params(model: TernaryTransformer) -> Dict[str, mx.array]:
     
     For TernaryLinear layers, we return the dequantized BF16 weights.
     """
-    params = {}
-    _collect_params(model, "", params)
+    params: Dict[str, mx.array] = {}
+    
+    for name, module in model.named_modules():
+        prefix = f"{name}." if name else ""
+        
+        # Handle ternary layers specially
+        if isinstance(module, TernaryLinear):
+            params[f"{prefix}weight"] = module.get_weight_bf16()
+            if module.bias is not None:
+                params[f"{prefix}bias"] = module.bias
+            continue
+        
+        # Regular parameters
+        weight = getattr(module, "weight", None)
+        if isinstance(weight, mx.array):
+            params[f"{prefix}weight"] = weight
+        
+        bias = getattr(module, "bias", None)
+        if bias is not None and isinstance(bias, mx.array):
+            params[f"{prefix}bias"] = bias
+    
     return params
-
-
-def _collect_params(module, prefix: str, params: Dict[str, mx.array]):
-    """Recursively collect parameters."""
-    # Handle TernaryLinear specially - get dequantized weights
-    if hasattr(module, 'get_weight_bf16') and hasattr(module, '_weight_int8'):
-        params[f"{prefix}weight"] = module.get_weight_bf16()
-        if module._bias is not None:
-            params[f"{prefix}bias"] = module._bias
-        return
-    
-    # Regular parameters
-    if hasattr(module, 'weight') and isinstance(module.weight, mx.array):
-        params[f"{prefix}weight"] = module.weight
-    
-    if hasattr(module, 'bias') and module.bias is not None:
-        params[f"{prefix}bias"] = module.bias
-    
-    # Recurse into children
-    if hasattr(module, '__dict__'):
-        for name, child in module.__dict__.items():
-            if name.startswith('_'):
-                continue
-            if isinstance(child, list):
-                for i, item in enumerate(child):
-                    _collect_params(item, f"{prefix}{name}.{i}.", params)
-            elif hasattr(child, '__call__') or hasattr(child, 'weight'):
-                _collect_params(child, f"{prefix}{name}.", params)
 
 
 def set_trainable_params(model: TernaryTransformer, params: Dict[str, mx.array]):
@@ -127,36 +137,50 @@ def set_trainable_params(model: TernaryTransformer, params: Dict[str, mx.array])
     
     For TernaryLinear layers, we re-quantize to INT8.
     """
-    _set_params(model, "", params)
+    for name, module in model.named_modules():
+        prefix = f"{name}." if name else ""
+        
+        if isinstance(module, TernaryLinear):
+            w_key = f"{prefix}weight"
+            if w_key in params:
+                module.set_weight_bf16(params[w_key])
+            
+            b_key = f"{prefix}bias"
+            if module.bias is not None and b_key in params:
+                module._bias = params[b_key]
+            continue
+        
+        w_key = f"{prefix}weight"
+        if hasattr(module, "weight") and w_key in params:
+            module.weight = params[w_key]
+        
+        b_key = f"{prefix}bias"
+        if hasattr(module, "bias") and b_key in params:
+            module.bias = params[b_key]
 
 
-def _set_params(module, prefix: str, params: Dict[str, mx.array]):
-    """Recursively set parameters."""
-    # Handle TernaryLinear specially - requantize
-    if hasattr(module, 'set_weight_bf16') and hasattr(module, '_weight_int8'):
-        if f"{prefix}weight" in params:
-            module.set_weight_bf16(params[f"{prefix}weight"])
-        if module._bias is not None and f"{prefix}bias" in params:
-            module._bias = params[f"{prefix}bias"]
-        return
+def compute_loss_and_grads(
+    model: TernaryTransformer,
+    batch: Batch,
+    use_checkpointing: bool = True,
+    checkpoint_every: int = 6,
+) -> Tuple[float, Dict[str, mx.array], Dict[str, mx.array]]:
+    """
+    Compute loss and gradients without applying an optimizer step.
+    """
+    params = get_trainable_params(model)
     
-    # Regular parameters
-    if hasattr(module, 'weight') and f"{prefix}weight" in params:
-        module.weight = params[f"{prefix}weight"]
+    def loss_fn(params_dict):
+        set_trainable_params(model, params_dict)
+        return compute_loss(model, batch, use_checkpointing, checkpoint_every)
     
-    if hasattr(module, 'bias') and f"{prefix}bias" in params:
-        module.bias = params[f"{prefix}bias"]
+    loss, grads = mx.value_and_grad(loss_fn)(params)
     
-    # Recurse into children
-    if hasattr(module, '__dict__'):
-        for name, child in module.__dict__.items():
-            if name.startswith('_'):
-                continue
-            if isinstance(child, list):
-                for i, item in enumerate(child):
-                    _set_params(item, f"{prefix}{name}.{i}.", params)
-            elif hasattr(child, '__call__') or hasattr(child, 'weight'):
-                _set_params(child, f"{prefix}{name}.", params)
+    # Materialize and detach grads to avoid holding computation graphs
+    grads = {name: mx.stop_gradient(g) for name, g in grads.items()}
+    mx.eval(*grads.values())
+    
+    return loss.item(), grads, params
 
 
 def train_step(
@@ -223,7 +247,7 @@ def evaluate(
         logits_flat = logits.reshape(-1, vocab_size)
         labels_flat = batch.labels.reshape(-1)
         
-        log_probs = mx.log_softmax(logits_flat.astype(mx.float32), axis=-1)
+        log_probs = nn.log_softmax(logits_flat.astype(mx.float32), axis=-1)
         target_log_probs = mx.take_along_axis(
             log_probs,
             labels_flat[:, None],
@@ -254,29 +278,14 @@ def log_ternary_stats(model: TernaryTransformer) -> Dict[str, float]:
     total_zero = 0
     total_params = 0
     
-    def check_module(module):
-        nonlocal total_pos, total_neg, total_zero, total_params
-        if hasattr(module, 'get_weight_bf16') and hasattr(module, 'threshold_factor'):
+    for _, module in model.named_modules():
+        if isinstance(module, TernaryLinear):
             w = module.get_weight_bf16()
             stats = compute_ternary_stats(w, module.threshold_factor)
             total_pos += stats["n_positive"]
             total_neg += stats["n_negative"]
             total_zero += stats["n_zero"]
             total_params += stats["total"]
-    
-    def traverse(module):
-        check_module(module)
-        if hasattr(module, '__dict__'):
-            for name, child in module.__dict__.items():
-                if name.startswith('_'):
-                    continue
-                if isinstance(child, list):
-                    for item in child:
-                        traverse(item)
-                elif hasattr(child, '__call__'):
-                    traverse(child)
-    
-    traverse(model)
     
     if total_params > 0:
         return {
@@ -297,34 +306,38 @@ def main():
                         help="Auto-resume from latest checkpoint")
     args = parser.parse_args()
     
+    log_path = Path("training.log")
+    logger = setup_logger(log_path)
+    log = logger.info
+    
     # Load configs
-    print(f"Loading config from {args.config}")
+    log(f"Loading config from {args.config}")
     model_config = ModelConfig.from_yaml(args.config)
     training_config = TrainingConfig.from_yaml(args.config)
     
-    print(f"\nModel config:")
-    print(f"  d_model: {model_config.d_model}")
-    print(f"  n_layers: {model_config.n_layers}")
-    print(f"  n_heads: {model_config.n_heads}")
-    print(f"  d_ff: {model_config.d_ff}")
-    print(f"  vocab_size: {model_config.vocab_size}")
+    log(f"\nModel config:")
+    log(f"  d_model: {model_config.d_model}")
+    log(f"  n_layers: {model_config.n_layers}")
+    log(f"  n_heads: {model_config.n_heads}")
+    log(f"  d_ff: {model_config.d_ff}")
+    log(f"  vocab_size: {model_config.vocab_size}")
     
-    print(f"\nTraining config:")
-    print(f"  learning_rate: {training_config.learning_rate}")
-    print(f"  batch_size: {training_config.batch_size}")
-    print(f"  gradient_accumulation: {training_config.gradient_accumulation_steps}")
-    print(f"  effective_batch_size: {training_config.effective_batch_size}")
-    print(f"  dataset: {training_config.dataset_name}"
+    log(f"\nTraining config:")
+    log(f"  learning_rate: {training_config.learning_rate}")
+    log(f"  batch_size: {training_config.batch_size}")
+    log(f"  gradient_accumulation: {training_config.gradient_accumulation_steps}")
+    log(f"  effective_batch_size: {training_config.effective_batch_size}")
+    log(f"  dataset: {training_config.dataset_name}"
           f"{f'/{training_config.dataset_config}' if training_config.dataset_config else ''}")
     
     # Create model
-    print("\nCreating model...")
+    log("\nCreating model...")
     model = create_model(model_config)
     
     # Count parameters
     param_counts = model.count_parameters()
     total_params = param_counts.get("total", 0)
-    print(f"Total parameters: {total_params:,} ({total_params / 1e6:.1f}M)")
+    log(f"Total parameters: {total_params:,} ({total_params / 1e6:.1f}M)")
     
     # Create optimizer
     optimizer = AdamW8bit(
@@ -335,20 +348,20 @@ def main():
     # Resume from checkpoint if specified
     start_step = 0
     if args.resume:
-        print(f"\nResuming from {args.resume}")
+        log(f"\nResuming from {args.resume}")
         state = load_checkpoint(args.resume, model, optimizer)
         start_step = state.get("step", 0)
-        print(f"Resumed at step {start_step}")
+        log(f"Resumed at step {start_step}")
     elif args.auto_resume:
         latest = get_latest_checkpoint(training_config.output_dir)
         if latest:
-            print(f"\nAuto-resuming from {latest}")
+            log(f"\nAuto-resuming from {latest}")
             state = load_checkpoint(latest, model, optimizer)
             start_step = state.get("step", 0)
-            print(f"Resumed at step {start_step}")
+            log(f"Resumed at step {start_step}")
     
     # Create data loaders
-    print("\nCreating data loaders...")
+    log("\nCreating data loaders...")
     train_loader = create_dataloader(
         split="train",
         batch_size=training_config.batch_size,
@@ -365,58 +378,71 @@ def main():
     )
     
     # Training loop
-    print(f"\nStarting training from step {start_step}...")
-    print(f"Output directory: {training_config.output_dir}")
-    print("-" * 60)
+    log(f"\nStarting training from step {start_step}...")
+    log(f"Output directory: {training_config.output_dir}")
+    log("-" * 60)
     
     step = start_step
     accumulated_loss = 0.0
-    accumulated_grad_norm = 0.0
     accumulation_count = 0
     
     tokens_processed = 0
     start_time = time.time()
     last_log_time = start_time
+    grad_accum = None
+    last_params = None
     
     for batch in train_loader:
         if step >= training_config.max_steps:
             break
         
-        # Get learning rate
-        lr = get_cosine_schedule_with_warmup(
-            step,
-            training_config.warmup_steps,
-            training_config.max_steps,
-            training_config.min_learning_rate,
-            training_config.learning_rate,
-        )
-        
-        # Training step
-        loss, grad_norm = train_step(
+        # Forward/backward; defer weight update until we accumulate enough microbatches
+        loss, grads, params = compute_loss_and_grads(
             model=model,
-            optimizer=optimizer,
             batch=batch,
-            lr=lr,
-            gradient_clip=training_config.gradient_clip,
             use_checkpointing=True,
             checkpoint_every=training_config.checkpoint_layers,
         )
         
-        # Accumulate
+        if grad_accum is None:
+            grad_accum = grads
+        else:
+            grad_accum = {
+                name: grad_accum[name] + grads[name]
+                for name in grads
+            }
+        
         accumulated_loss += loss
-        accumulated_grad_norm += grad_norm
         accumulation_count += 1
         tokens_processed += batch.batch_size * batch.seq_len
+        last_params = params
         
         # Evaluate graph to free memory
         mx.eval(model.embed.weight)  # Force evaluation
         
-        # Actual step (after gradient accumulation)
+        # Actual optimizer step (after gradient accumulation)
         if accumulation_count >= training_config.gradient_accumulation_steps:
+            lr = get_cosine_schedule_with_warmup(
+                step,
+                training_config.warmup_steps,
+                training_config.max_steps,
+                training_config.min_learning_rate,
+                training_config.learning_rate,
+            )
+            
+            scale = 1.0 / accumulation_count
+            mean_grads = {name: g * scale for name, g in grad_accum.items()}
+            mean_grads, raw_grad_norm, clipped_grad_norm = clip_gradients(
+                mean_grads,
+                training_config.gradient_clip,
+            )
+            
+            updated_params = optimizer.step(last_params, mean_grads, lr=lr)
+            set_trainable_params(model, updated_params)
+            
             step += 1
             
             avg_loss = accumulated_loss / accumulation_count
-            avg_grad_norm = accumulated_grad_norm / accumulation_count
             
             # Logging
             if step % training_config.log_interval == 0:
@@ -426,29 +452,29 @@ def main():
                 
                 perplexity = compute_perplexity(avg_loss)
                 
-                print(f"Step {step:6d} | "
-                      f"Loss: {avg_loss:.4f} | "
-                      f"PPL: {perplexity:.2f} | "
-                      f"LR: {lr:.2e} | "
-                      f"Grad: {avg_grad_norm:.3f} | "
-                      f"Tok/s: {tokens_per_sec:.0f}")
+                log(f"Step {step:6d} | "
+                    f"Loss: {avg_loss:.4f} | "
+                    f"PPL: {perplexity:.2f} | "
+                    f"LR: {lr:.2e} | "
+                    f"Grad: {clipped_grad_norm:.3f} (raw {raw_grad_norm:.3f}) | "
+                    f"Tok/s: {tokens_per_sec:.0f}")
                 
                 last_log_time = current_time
                 tokens_processed = 0
             
             # Evaluation
             if step % training_config.eval_interval == 0:
-                print("\nRunning evaluation...")
+                log("\nRunning evaluation...")
                 eval_metrics = evaluate(model, val_dataset, training_config.batch_size)
                 ternary_stats = log_ternary_stats(model)
                 
-                print(f"  Val Loss: {eval_metrics['loss']:.4f}")
-                print(f"  Val PPL: {eval_metrics['perplexity']:.2f}")
+                log(f"  Val Loss: {eval_metrics['loss']:.4f}")
+                log(f"  Val PPL: {eval_metrics['perplexity']:.2f}")
                 if ternary_stats:
-                    print(f"  Ternary +1: {ternary_stats['ternary_pct_positive']:.1f}%")
-                    print(f"  Ternary  0: {ternary_stats['ternary_pct_zero']:.1f}%")
-                    print(f"  Ternary -1: {ternary_stats['ternary_pct_negative']:.1f}%")
-                print()
+                    log(f"  Ternary +1: {ternary_stats['ternary_pct_positive']:.1f}%")
+                    log(f"  Ternary  0: {ternary_stats['ternary_pct_zero']:.1f}%")
+                    log(f"  Ternary -1: {ternary_stats['ternary_pct_negative']:.1f}%")
+                log("")
             
             # Save checkpoint
             if step % training_config.save_interval == 0:
@@ -465,11 +491,11 @@ def main():
             
             # Reset accumulation
             accumulated_loss = 0.0
-            accumulated_grad_norm = 0.0
             accumulation_count = 0
+            grad_accum = None
     
     # Final save
-    print("\nTraining complete!")
+    log("\nTraining complete!")
     final_path = Path(training_config.output_dir) / "final"
     save_checkpoint(
         path=str(final_path),
@@ -481,7 +507,7 @@ def main():
     )
     
     total_time = time.time() - start_time
-    print(f"Total training time: {total_time / 3600:.2f} hours")
+    log(f"Total training time: {total_time / 3600:.2f} hours")
 
 
 if __name__ == "__main__":

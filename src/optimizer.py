@@ -43,14 +43,14 @@ class AdamW8bit:
         self.eps = eps
         self.weight_decay = weight_decay
         
-        self.state: Dict[int, OptimizerState] = {}
+        self.state: Dict[str, OptimizerState] = {}
         self._step_count = 0
     
-    def init_state(self, param: mx.array, param_id: int) -> OptimizerState:
+    def init_state(self, param: mx.array) -> OptimizerState:
         """Initialize optimizer state for a parameter."""
-        # Initialize moments to zero
-        m = mx.zeros_like(param, dtype=mx.bfloat16)
-        v = mx.zeros_like(param, dtype=mx.bfloat16)
+        # Initialize moments to zero (BF16 for stability)
+        m = mx.zeros(param.shape, dtype=mx.bfloat16)
+        v = mx.zeros(param.shape, dtype=mx.bfloat16)
         
         # Quantize first moment to INT8
         m_int8, m_scale = quantize_int8_momentum(m)
@@ -90,13 +90,13 @@ class AdamW8bit:
                 continue
             
             grad = grads[name]
-            param_id = id(param)
+            param_key = name
             
             # Initialize state if needed
-            if param_id not in self.state:
-                self.state[param_id] = self.init_state(param, param_id)
+            if param_key not in self.state:
+                self.state[param_key] = self.init_state(param)
             
-            state = self.state[param_id]
+            state = self.state[param_key]
             state.step += 1
             
             # Convert param to BF16 for computation
@@ -106,6 +106,11 @@ class AdamW8bit:
             # Dequantize first moment
             m = dequantize_int8_momentum(state.m_int8, state.m_scale)
             v = state.v
+            
+            if m.shape != grad_bf16.shape:
+                raise ValueError(
+                    f"Shape mismatch for {name}: m {m.shape}, grad {grad.shape}, param {param.shape}"
+                )
             
             # Update biased first moment
             m = self.beta1 * m + (1 - self.beta1) * grad_bf16
@@ -195,7 +200,7 @@ class SGDMomentum8bit:
         self.momentum = momentum
         self.weight_decay = weight_decay
         
-        self.velocity: Dict[int, Tuple[mx.array, mx.array]] = {}  # (v_int8, scale)
+        self.velocity: Dict[str, Tuple[mx.array, mx.array]] = {}  # (v_int8, scale)
         self._step_count = 0
     
     def step(
@@ -216,7 +221,7 @@ class SGDMomentum8bit:
                 continue
             
             grad = grads[name]
-            param_id = id(param)
+            param_key = name
             
             param_bf16 = param.astype(mx.bfloat16)
             grad_bf16 = grad.astype(mx.bfloat16)
@@ -226,8 +231,8 @@ class SGDMomentum8bit:
                 grad_bf16 = grad_bf16 + self.weight_decay * param_bf16
             
             # Get or initialize velocity
-            if param_id in self.velocity:
-                v_int8, v_scale = self.velocity[param_id]
+            if param_key in self.velocity:
+                v_int8, v_scale = self.velocity[param_key]
                 v = dequantize_int8_momentum(v_int8, v_scale)
             else:
                 v = mx.zeros_like(param_bf16)
@@ -240,7 +245,7 @@ class SGDMomentum8bit:
             
             # Quantize velocity
             v_int8, v_scale = quantize_int8_momentum(v)
-            self.velocity[param_id] = (v_int8, v_scale)
+            self.velocity[param_key] = (v_int8, v_scale)
             
             updated_params[name] = new_param
         
@@ -281,7 +286,7 @@ def get_cosine_schedule_with_warmup(
 def clip_gradients(
     grads: Dict[str, mx.array],
     max_norm: float,
-) -> Tuple[Dict[str, mx.array], float]:
+) -> Tuple[Dict[str, mx.array], float, float]:
     """
     Clip gradients by global norm.
     
@@ -290,7 +295,7 @@ def clip_gradients(
         max_norm: Maximum gradient norm
         
     Returns:
-        Clipped gradients and the original norm
+        Clipped gradients, original norm, clipped norm
     """
     # Compute global norm
     total_norm_sq = mx.array(0.0, dtype=mx.float32)
@@ -301,12 +306,14 @@ def clip_gradients(
     
     # Clip if necessary
     clip_coef = max_norm / (total_norm + 1e-6)
-    clip_coef = mx.minimum(clip_coef, mx.array(1.0))
+    applied_coef = mx.minimum(clip_coef, mx.array(1.0))
     
     clipped_grads = {
-        name: grad * clip_coef.astype(grad.dtype)
+        name: grad * applied_coef.astype(grad.dtype)
         for name, grad in grads.items()
     }
     
-    return clipped_grads, total_norm.item()
+    clipped_norm = total_norm * applied_coef
+    
+    return clipped_grads, total_norm.item(), clipped_norm.item()
 

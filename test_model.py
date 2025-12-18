@@ -16,32 +16,6 @@ print("=" * 60)
 print("Ternary Transformer - Component Tests")
 print("=" * 60)
 
-
-def test_quantization():
-    """Test INT8 quantization roundtrip."""
-    print("\n[1] Testing INT8 Quantization...")
-    
-    from src.quantization import quantize_int8, dequantize_int8
-    
-    # Create test tensor
-    w = mx.random.normal(shape=(128, 256), dtype=mx.bfloat16)
-    
-    # Quantize and dequantize
-    w_int8, scale = quantize_int8(w)
-    w_recovered = dequantize_int8(w_int8, scale)
-    
-    # Check shapes
-    assert w_int8.shape == w.shape, f"Shape mismatch: {w_int8.shape} vs {w.shape}"
-    assert w_int8.dtype == mx.int8, f"Wrong dtype: {w_int8.dtype}"
-    assert scale.shape == (128, 1), f"Scale shape: {scale.shape}"
-    
-    # Check error
-    error = mx.mean(mx.abs(w - w_recovered)).item()
-    print(f"  Shape: {w.shape} -> INT8 -> {w_recovered.shape}")
-    print(f"  Mean absolute error: {error:.6f}")
-    print("  ✓ Quantization test passed")
-
-
 def test_ternarization():
     """Test ternarization with STE."""
     print("\n[2] Testing Ternarization with STE...")
@@ -205,12 +179,12 @@ def test_full_model():
 
 
 def test_optimizer():
-    """Test 8-bit optimizer."""
-    print("\n[7] Testing AdamW8bit Optimizer...")
+    """Test AdamW optimizer."""
+    print("\n[7] Testing AdamW Optimizer...")
     
-    from src.optimizer import AdamW8bit, get_cosine_schedule_with_warmup
+    from src.optimizer import AdamW, get_cosine_schedule_with_warmup
     
-    optimizer = AdamW8bit(learning_rate=1e-3, weight_decay=0.1)
+    optimizer = AdamW(learning_rate=1e-3, weight_decay=0.1)
     
     # Test parameter update
     params = {

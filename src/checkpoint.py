@@ -17,13 +17,13 @@ from dataclasses import asdict
 
 from .config import ModelConfig, TrainingConfig
 from .model import TernaryTransformer
-from .optimizer import AdamW8bit
+from .optimizer import AdamW
 
 
 def save_checkpoint(
     path: str,
     model: TernaryTransformer,
-    optimizer: Optional[AdamW8bit],
+    optimizer: Optional[AdamW],
     step: int,
     config: ModelConfig,
     training_config: Optional[TrainingConfig] = None,
@@ -92,7 +92,7 @@ def save_checkpoint(
 def load_checkpoint(
     path: str,
     model: Optional[TernaryTransformer] = None,
-    optimizer: Optional[AdamW8bit] = None,
+    optimizer: Optional[AdamW] = None,
 ) -> Dict[str, Any]:
     """
     Load a training checkpoint.
@@ -159,10 +159,9 @@ def load_checkpoint(
 
 def _collect_weights(module: Any, prefix: str, weights: Dict[str, mx.array]):
     """Recursively collect weights from a module."""
-    # Handle module's direct parameters
-    if hasattr(module, '_weight_int8'):
-        weights[f"{prefix}weight_int8"] = module._weight_int8
-        weights[f"{prefix}scale"] = module._scale
+    # Handle TernaryLinear weights
+    if hasattr(module, '_weight'):
+        weights[f"{prefix}weight"] = module._weight
         if module._bias is not None:
             weights[f"{prefix}bias"] = module._bias
         return
@@ -187,11 +186,10 @@ def _collect_weights(module: Any, prefix: str, weights: Dict[str, mx.array]):
 
 def _load_weights(module: Any, prefix: str, weights: Dict[str, mx.array]):
     """Recursively load weights into a module."""
-    # Handle module's direct parameters
-    if hasattr(module, '_weight_int8'):
-        if f"{prefix}weight_int8" in weights:
-            module._weight_int8 = weights[f"{prefix}weight_int8"]
-            module._scale = weights[f"{prefix}scale"]
+    # Handle TernaryLinear weights
+    if hasattr(module, '_weight'):
+        if f"{prefix}weight" in weights:
+            module._weight = weights[f"{prefix}weight"]
             if module._bias is not None and f"{prefix}bias" in weights:
                 module._bias = weights[f"{prefix}bias"]
         return

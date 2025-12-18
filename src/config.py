@@ -21,6 +21,7 @@ class ModelConfig:
     
     # Quantization
     threshold_factor: float = 0.7  # τ = factor * mean(|W|)
+    ternary_temperature: float = 0.15
     
     # Dropout (typically 0 for small models)
     dropout: float = 0.0
@@ -51,11 +52,13 @@ class TrainingConfig:
     """Configuration for training."""
     
     # Optimization
-    learning_rate: float = 3e-4
-    min_learning_rate: float = 3e-5
-    warmup_steps: int = 2000
+    learning_rate: float = 1e-4
+    min_learning_rate: float = 1e-5
+    warmup_steps: int = 5000
     weight_decay: float = 0.1
-    gradient_clip: float = 1.0
+    gradient_clip: float = 0.5
+    ternary_skip_steps: int = 1000
+    ternary_fadein_steps: int = 0
     
     # Batch settings
     batch_size: int = 4

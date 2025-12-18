@@ -1,9 +1,8 @@
 """
-8-bit AdamW optimizer for memory-efficient training.
+AdamW optimizer tuned for ternary training stability.
 
-- First moment (m): INT8 with per-tensor scaling
-- Second moment (v): BF16 (needs precision for stability)
-- Updates computed in BF16
+- Moments kept in float32 for numerical safety
+- Supports BF16 parameters and updates
 """
 
 import mlx.core as mx
@@ -11,24 +10,20 @@ from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 import math
 
-from .quantization import quantize_int8_momentum, dequantize_int8_momentum
-
 
 @dataclass
 class OptimizerState:
     """State for a single parameter."""
-    m_int8: mx.array          # First moment (INT8)
-    m_scale: mx.array         # Scale for first moment
-    v: mx.array               # Second moment (BF16)
+    m: mx.array               # First moment (FP32)
+    v: mx.array               # Second moment (FP32)
     step: int                 # Step count for bias correction
 
 
-class AdamW8bit:
+class AdamW:
     """
-    8-bit AdamW optimizer.
+    AdamW optimizer for BF16 weights.
     
-    Stores first moment in INT8 to save memory.
-    Second moment kept in BF16 for stability.
+    First and second moments kept in float32 for stability.
     """
     
     def __init__(
@@ -48,19 +43,10 @@ class AdamW8bit:
     
     def init_state(self, param: mx.array) -> OptimizerState:
         """Initialize optimizer state for a parameter."""
-        # Initialize moments to zero (BF16 for stability)
-        m = mx.zeros(param.shape, dtype=mx.bfloat16)
-        v = mx.zeros(param.shape, dtype=mx.bfloat16)
-        
-        # Quantize first moment to INT8
-        m_int8, m_scale = quantize_int8_momentum(m)
-        
-        return OptimizerState(
-            m_int8=m_int8,
-            m_scale=m_scale,
-            v=v,
-            step=0,
-        )
+        # Keep optimizer state in float32 for stability
+        m = mx.zeros(param.shape, dtype=mx.float32)
+        v = mx.zeros(param.shape, dtype=mx.float32)
+        return OptimizerState(m=m, v=v, step=0)
     
     def step(
         self,
@@ -99,24 +85,24 @@ class AdamW8bit:
             state = self.state[param_key]
             state.step += 1
             
-            # Convert param to BF16 for computation
-            param_bf16 = param.astype(mx.bfloat16)
-            grad_bf16 = grad.astype(mx.bfloat16)
+            # Convert inputs to float32 for stable moment updates
+            param_f32 = param.astype(mx.float32)
+            grad_f32 = grad.astype(mx.float32)
             
-            # Dequantize first moment
-            m = dequantize_int8_momentum(state.m_int8, state.m_scale)
+            # Get moments
+            m = state.m
             v = state.v
             
-            if m.shape != grad_bf16.shape:
+            if m.shape != grad_f32.shape:
                 raise ValueError(
                     f"Shape mismatch for {name}: m {m.shape}, grad {grad.shape}, param {param.shape}"
                 )
             
             # Update biased first moment
-            m = self.beta1 * m + (1 - self.beta1) * grad_bf16
+            m = self.beta1 * m + (1 - self.beta1) * grad_f32
             
             # Update biased second moment
-            v = self.beta2 * v + (1 - self.beta2) * (grad_bf16 * grad_bf16)
+            v = self.beta2 * v + (1 - self.beta2) * (grad_f32 * grad_f32)
             
             # Bias correction
             bias_correction1 = 1 - self.beta1 ** state.step
@@ -127,19 +113,19 @@ class AdamW8bit:
             
             # Compute update
             # Use float32 for numerical stability in division
-            denom = mx.sqrt(v_hat.astype(mx.float32)) + self.eps
-            update = m_hat.astype(mx.float32) / denom
+            denom = mx.sqrt(v_hat) + self.eps
+            update = m_hat / denom
             
             # Apply weight decay (decoupled)
             if self.weight_decay > 0:
-                update = update + self.weight_decay * param_bf16.astype(mx.float32)
+                update = update + self.weight_decay * param_f32
             
             # Update parameter
-            new_param = param_bf16.astype(mx.float32) - lr * update
-            new_param = new_param.astype(mx.bfloat16)
+            new_param = param_f32 - lr * update
+            new_param = new_param.astype(param.dtype)
             
-            # Quantize first moment back to INT8
-            state.m_int8, state.m_scale = quantize_int8_momentum(m)
+            # Update state
+            state.m = m
             state.v = v
             
             updated_params[name] = new_param
@@ -161,8 +147,7 @@ class AdamW8bit:
             "weight_decay": self.weight_decay,
             "state": {
                 str(k): {
-                    "m_int8": v.m_int8,
-                    "m_scale": v.m_scale,
+                    "m": v.m,
                     "v": v.v,
                     "step": v.step,
                 }
@@ -183,11 +168,9 @@ class AdamW8bit:
         # This is handled during checkpoint loading
 
 
-class SGDMomentum8bit:
+class SGDMomentum:
     """
-    Simple SGD with momentum, using INT8 for momentum storage.
-    
-    Even more memory efficient than AdamW8bit.
+    Simple SGD with momentum for BF16 weights.
     """
     
     def __init__(
@@ -200,7 +183,7 @@ class SGDMomentum8bit:
         self.momentum = momentum
         self.weight_decay = weight_decay
         
-        self.velocity: Dict[str, Tuple[mx.array, mx.array]] = {}  # (v_int8, scale)
+        self.velocity: Dict[str, mx.array] = {}  # velocity in BF16
         self._step_count = 0
     
     def step(
@@ -232,8 +215,7 @@ class SGDMomentum8bit:
             
             # Get or initialize velocity
             if param_key in self.velocity:
-                v_int8, v_scale = self.velocity[param_key]
-                v = dequantize_int8_momentum(v_int8, v_scale)
+                v = self.velocity[param_key]
             else:
                 v = mx.zeros_like(param_bf16)
             
@@ -243,9 +225,8 @@ class SGDMomentum8bit:
             # Update parameter
             new_param = param_bf16 - lr * v
             
-            # Quantize velocity
-            v_int8, v_scale = quantize_int8_momentum(v)
-            self.velocity[param_key] = (v_int8, v_scale)
+            # Store velocity
+            self.velocity[param_key] = v
             
             updated_params[name] = new_param
         
@@ -286,7 +267,7 @@ def get_cosine_schedule_with_warmup(
 def clip_gradients(
     grads: Dict[str, mx.array],
     max_norm: float,
-) -> Tuple[Dict[str, mx.array], float, float]:
+) -> Tuple[Dict[str, mx.array], float]:
     """
     Clip gradients by global norm.
     
@@ -295,7 +276,7 @@ def clip_gradients(
         max_norm: Maximum gradient norm
         
     Returns:
-        Clipped gradients, original norm, clipped norm
+        Clipped gradients and the original norm
     """
     # Compute global norm
     total_norm_sq = mx.array(0.0, dtype=mx.float32)
@@ -306,14 +287,12 @@ def clip_gradients(
     
     # Clip if necessary
     clip_coef = max_norm / (total_norm + 1e-6)
-    applied_coef = mx.minimum(clip_coef, mx.array(1.0))
+    clip_coef = mx.minimum(clip_coef, mx.array(1.0))
     
     clipped_grads = {
-        name: grad * applied_coef.astype(grad.dtype)
+        name: grad * clip_coef.astype(grad.dtype)
         for name, grad in grads.items()
     }
     
-    clipped_norm = total_norm * applied_coef
-    
-    return clipped_grads, total_norm.item(), clipped_norm.item()
+    return clipped_grads, total_norm.item()
 

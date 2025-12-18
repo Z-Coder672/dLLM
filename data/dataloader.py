@@ -8,6 +8,9 @@ Features:
 - Shuffle buffer for randomization
 """
 
+import os
+from pathlib import Path
+
 import mlx.core as mx
 import numpy as np
 from typing import Iterator, Optional, List, Tuple
@@ -56,29 +59,57 @@ class StreamingTextDataset:
         self.dataset_name = dataset_name
         self.dataset_config = dataset_config
         self.tokenizer = get_tokenizer()
+        self.cache_dir = (Path(__file__).resolve().parent / "cache").expanduser()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         # Special tokens
         self.eos_token = self.tokenizer.encode("<|endoftext|>", allowed_special={"<|endoftext|>"})[0]
         
         self._dataset = None
     
+    def _dataset_cache_present(self) -> bool:
+        """Check if the dataset is already cached locally."""
+        cache_pattern = self.dataset_name.replace("/", "_")
+        return any(path.is_dir() for path in self.cache_dir.glob(f"{cache_pattern}*"))
+    
     def _load_dataset(self):
         """Lazily load the dataset."""
         if self._dataset is None:
-            from datasets import load_dataset
-            if self.dataset_config:
-                self._dataset = load_dataset(
+            from datasets import DownloadConfig, load_dataset
+            
+            # Allow slower but more reliable downloads
+            os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "120")
+            os.environ.setdefault("HF_HUB_HTTP_TIMEOUT", "120")
+            os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
+            
+            def _do_load(local_only: bool):
+                download_config = DownloadConfig(
+                    cache_dir=str(self.cache_dir),
+                    max_retries=5,
+                    local_files_only=local_only,
+                )
+                if self.dataset_config:
+                    return load_dataset(
+                        self.dataset_name,
+                        self.dataset_config,
+                        split=self.split,
+                        streaming=True,
+                        cache_dir=str(self.cache_dir),
+                        download_config=download_config,
+                    )
+                return load_dataset(
                     self.dataset_name,
-                    self.dataset_config,
                     split=self.split,
                     streaming=True,
+                    cache_dir=str(self.cache_dir),
+                    download_config=download_config,
                 )
-            else:
-                self._dataset = load_dataset(
-                    self.dataset_name,
-                    split=self.split,
-                    streaming=True,
-                )
+            
+            try:
+                self._dataset = _do_load(local_only=self._dataset_cache_present())
+            except Exception:
+                # If cache-only load fails (or cache missing), fall back to download
+                self._dataset = _do_load(local_only=False)
             if self.shuffle_buffer > 0:
                 self._dataset = self._dataset.shuffle(
                     buffer_size=self.shuffle_buffer,

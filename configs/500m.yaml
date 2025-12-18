@@ -8,21 +8,24 @@ model:
   vocab_size: 50257
   max_seq_len: 1024
   threshold_factor: 0.7
+  ternary_temperature: 0.15
   dropout: 0.0
   rope_theta: 10000.0
   dtype: bfloat16
 
 training:
-  learning_rate: 0.0003
-  min_learning_rate: 0.00003
-  warmup_steps: 2000
+  learning_rate: 0.0001
+  min_learning_rate: 0.00001
+  warmup_steps: 5000
   weight_decay: 0.1
-  gradient_clip: 1.0
+  gradient_clip: 0.5
+  ternary_skip_steps: 100000
+  ternary_fadein_steps: 100
   batch_size: 4
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 2
   max_steps: 100000
   eval_interval: 500
-  save_interval: 2000
+  save_interval: 500
   log_interval: 10
   scale_update_interval: 500
   checkpoint_layers: 6

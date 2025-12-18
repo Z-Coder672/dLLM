@@ -11,7 +11,6 @@ import mlx.nn as nn
 import math
 from typing import Optional
 
-from .quantization import quantize_int8, dequantize_int8
 from .ste import ternarize
 
 
@@ -30,25 +29,25 @@ class TernaryLinear(nn.Module):
         out_features: int,
         bias: bool = False,
         threshold_factor: float = 0.7,
+        temperature: float = 0.15,
     ):
         super().__init__()
         
         self.in_features = in_features
         self.out_features = out_features
         self.threshold_factor = threshold_factor
+        self.ternary_temperature = temperature
+        self._ternary_enabled = True
+        self._ternary_strength = 1.0
         
-        # Initialize in BF16, then quantize to INT8
-        # Using scaled initialization for better training stability
-        scale = 1.0 / math.sqrt(in_features)
-        w_init = mx.random.uniform(
+        # Initialize weights in BF16
+        scale = 0.01
+        self._weight = mx.random.uniform(
             low=-scale,
             high=scale,
             shape=(out_features, in_features),
             dtype=mx.bfloat16
         )
-        
-        # Quantize initial weights
-        self._weight_int8, self._scale = quantize_int8(w_init)
         
         # Optional bias (kept in BF16)
         if bias:
@@ -57,24 +56,29 @@ class TernaryLinear(nn.Module):
             self._bias = None
     
     @property
-    def weight_int8(self) -> mx.array:
-        return self._weight_int8
-    
-    @property
-    def scale(self) -> mx.array:
-        return self._scale
+    def weight(self) -> mx.array:
+        return self._weight
     
     @property
     def bias(self) -> Optional[mx.array]:
         return self._bias
     
     def get_weight_bf16(self) -> mx.array:
-        """Get dequantized weights in BF16."""
-        return dequantize_int8(self._weight_int8, self._scale)
+        """Get weights in BF16."""
+        return self._weight
     
     def set_weight_bf16(self, w_bf16: mx.array):
-        """Set weights from BF16 (re-quantizes to INT8)."""
-        self._weight_int8, self._scale = quantize_int8(w_bf16)
+        """Set weights in BF16."""
+        self._weight = w_bf16
+    
+    def set_ternary_enabled(self, enabled: bool):
+        """Enable or disable ternary forward path."""
+        self._ternary_enabled = enabled
+    
+    def set_ternary_strength(self, strength: float):
+        """Blend factor between full-precision and ternary weights."""
+        strength_clamped = max(0.0, min(1.0, float(strength)))
+        self._ternary_strength = strength_clamped
     
     def __call__(self, x: mx.array) -> mx.array:
         """
@@ -86,16 +90,27 @@ class TernaryLinear(nn.Module):
         Returns:
             Output tensor, shape (..., out_features)
         """
-        # Dequantize INT8 -> BF16
-        w_bf16 = dequantize_int8(self._weight_int8, self._scale)
-        
         # Ternarize for forward pass (STE handles backward)
-        w_ternary = ternarize(w_bf16, self.threshold_factor)
+        if self._ternary_enabled:
+            w_ternary = ternarize(
+                self._weight,
+                self.threshold_factor,
+                self.ternary_temperature,
+            )
+            strength = self._ternary_strength
+            if strength >= 1.0:
+                w_forward = w_ternary
+            elif strength <= 0.0:
+                w_forward = self._weight
+            else:
+                w_forward = strength * w_ternary + (1.0 - strength) * self._weight
+        else:
+            w_forward = self._weight
         
         # Matrix multiplication
         # x: (..., in_features), w_ternary: (out_features, in_features)
         # Result: (..., out_features)
-        out = x @ w_ternary.T
+        out = x @ w_forward.T
         
         if self._bias is not None:
             out = out + self._bias
@@ -151,15 +166,31 @@ class SwiGLU(nn.Module):
         d_model: int,
         d_ff: int,
         threshold_factor: float = 0.7,
+        temperature: float = 0.15,
     ):
         super().__init__()
         
         # Gate and up projections
-        self.w_gate = TernaryLinear(d_model, d_ff, threshold_factor=threshold_factor)
-        self.w_up = TernaryLinear(d_model, d_ff, threshold_factor=threshold_factor)
+        self.w_gate = TernaryLinear(
+            d_model,
+            d_ff,
+            threshold_factor=threshold_factor,
+            temperature=temperature,
+        )
+        self.w_up = TernaryLinear(
+            d_model,
+            d_ff,
+            threshold_factor=threshold_factor,
+            temperature=temperature,
+        )
         
         # Down projection
-        self.w_down = TernaryLinear(d_ff, d_model, threshold_factor=threshold_factor)
+        self.w_down = TernaryLinear(
+            d_ff,
+            d_model,
+            threshold_factor=threshold_factor,
+            temperature=temperature,
+        )
     
     def __call__(self, x: mx.array) -> mx.array:
         """
@@ -190,10 +221,11 @@ class FeedForward(nn.Module):
         d_model: int,
         d_ff: int,
         threshold_factor: float = 0.7,
+        temperature: float = 0.15,
         dropout: float = 0.0,
     ):
         super().__init__()
-        self.swiglu = SwiGLU(d_model, d_ff, threshold_factor)
+        self.swiglu = SwiGLU(d_model, d_ff, threshold_factor, temperature)
         self.dropout = dropout
     
     def __call__(self, x: mx.array, training: bool = False) -> mx.array:

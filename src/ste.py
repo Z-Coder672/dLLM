@@ -8,7 +8,11 @@ The backward pass passes gradients through unchanged (identity).
 import mlx.core as mx
 
 
-def _ternarize_impl(w: mx.array, threshold_factor: float) -> mx.array:
+def _ternarize_impl(
+    w: mx.array,
+    threshold_factor: float,
+    temperature: float = 0.15,
+) -> mx.array:
     """
     Core ternarization logic.
     
@@ -19,20 +23,29 @@ def _ternarize_impl(w: mx.array, threshold_factor: float) -> mx.array:
     Returns:
         Ternary weights {-1, 0, +1} in bfloat16
     """
+    w_f32 = w.astype(mx.float32)
+    temp = mx.array(max(temperature, 1e-6), dtype=mx.float32)
+    
     # Compute adaptive threshold based on weight magnitude
-    threshold = threshold_factor * mx.mean(mx.abs(w))
+    threshold = threshold_factor * mx.mean(mx.abs(w_f32))
+    
+    scaled = w_f32 / temp
     
     # Ternarize: values above threshold become sign(w), others become 0
     ternary = mx.where(
-        mx.abs(w) > threshold,
-        mx.sign(w),
-        mx.zeros_like(w)
+        mx.abs(scaled) > threshold,
+        mx.sign(scaled),
+        mx.zeros_like(scaled)
     )
     
-    return ternary
+    return ternary.astype(w.dtype)
 
 
-def ternarize(w: mx.array, threshold_factor: float = 0.7) -> mx.array:
+def ternarize(
+    w: mx.array,
+    threshold_factor: float = 0.7,
+    temperature: float = 0.15,
+) -> mx.array:
     """
     Ternarize weights with Straight-Through Estimator.
     
@@ -46,15 +59,19 @@ def ternarize(w: mx.array, threshold_factor: float = 0.7) -> mx.array:
     Returns:
         Ternary weights {-1, 0, +1} in bfloat16
     """
-    return _ternarize_ste(w, threshold_factor)
+    return _ternarize_ste(w, threshold_factor, temperature)
 
 
 @mx.custom_function
-def _ternarize_ste(w: mx.array, threshold_factor: float) -> mx.array:
+def _ternarize_ste(
+    w: mx.array,
+    threshold_factor: float,
+    temperature: float = 0.15,
+) -> mx.array:
     """
     Ternarization with custom VJP for straight-through gradient.
     """
-    return _ternarize_impl(w, threshold_factor)
+    return _ternarize_impl(w, threshold_factor, temperature)
 
 
 @_ternarize_ste.vjp
@@ -76,12 +93,13 @@ def _ternarize_vjp(primals, cotangents, output):
     """
     grad_output = cotangents
     # STE: gradient passes through unchanged
-    # No gradient for threshold_factor (it's a hyperparameter)
-    return grad_output, None
+    # No gradient for threshold_factor or temperature (hyperparameters)
+    return grad_output, None, None
 
 
 def ternarize_stochastic(w: mx.array, threshold_factor: float = 0.7, 
-                         noise_scale: float = 0.1, key: mx.array = None) -> mx.array:
+                         noise_scale: float = 0.1, key: mx.array = None,
+                         temperature: float = 0.15) -> mx.array:
     """
     Stochastic ternarization for training exploration.
     
@@ -110,10 +128,14 @@ def ternarize_stochastic(w: mx.array, threshold_factor: float = 0.7,
     )
     w_noisy = w + noise * mx.std(w)
     
-    return ternarize(w_noisy, threshold_factor)
+    return ternarize(w_noisy, threshold_factor, temperature)
 
 
-def compute_ternary_stats(w: mx.array, threshold_factor: float = 0.7) -> dict:
+def compute_ternary_stats(
+    w: mx.array,
+    threshold_factor: float = 0.7,
+    temperature: float = 0.15,
+) -> dict:
     """
     Compute statistics about the ternary weight distribution.
     
@@ -126,7 +148,7 @@ def compute_ternary_stats(w: mx.array, threshold_factor: float = 0.7) -> dict:
     Returns:
         Dict with counts and percentages of {-1, 0, +1}
     """
-    ternary = _ternarize_impl(w, threshold_factor)
+    ternary = _ternarize_impl(w, threshold_factor, temperature)
     total = ternary.size
     
     n_pos = mx.sum(ternary > 0).item()

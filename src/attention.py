@@ -109,6 +109,7 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         n_kv_heads: Optional[int] = None,
         threshold_factor: float = 0.7,
+        temperature: float = 0.15,
         max_seq_len: int = 2048,
         rope_theta: float = 10000.0,
         dropout: float = 0.0,
@@ -127,10 +128,30 @@ class MultiHeadAttention(nn.Module):
         self.n_rep = n_heads // self.n_kv_heads  # Repetition factor for GQA
         
         # Projections using ternary linear layers
-        self.q_proj = TernaryLinear(d_model, n_heads * self.head_dim, threshold_factor=threshold_factor)
-        self.k_proj = TernaryLinear(d_model, self.n_kv_heads * self.head_dim, threshold_factor=threshold_factor)
-        self.v_proj = TernaryLinear(d_model, self.n_kv_heads * self.head_dim, threshold_factor=threshold_factor)
-        self.o_proj = TernaryLinear(n_heads * self.head_dim, d_model, threshold_factor=threshold_factor)
+        self.q_proj = TernaryLinear(
+            d_model,
+            n_heads * self.head_dim,
+            threshold_factor=threshold_factor,
+            temperature=temperature,
+        )
+        self.k_proj = TernaryLinear(
+            d_model,
+            self.n_kv_heads * self.head_dim,
+            threshold_factor=threshold_factor,
+            temperature=temperature,
+        )
+        self.v_proj = TernaryLinear(
+            d_model,
+            self.n_kv_heads * self.head_dim,
+            threshold_factor=threshold_factor,
+            temperature=temperature,
+        )
+        self.o_proj = TernaryLinear(
+            n_heads * self.head_dim,
+            d_model,
+            threshold_factor=threshold_factor,
+            temperature=temperature,
+        )
         
         # Precompute RoPE frequencies
         self.cos, self.sin = precompute_rope_frequencies(

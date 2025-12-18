@@ -41,6 +41,7 @@ class TransformerBlock(nn.Module):
             d_model=config.d_model,
             n_heads=config.n_heads,
             threshold_factor=config.threshold_factor,
+            temperature=config.ternary_temperature,
             max_seq_len=config.max_seq_len,
             rope_theta=config.rope_theta,
             dropout=config.dropout,
@@ -54,6 +55,7 @@ class TransformerBlock(nn.Module):
             d_model=config.d_model,
             d_ff=config.d_ff,
             threshold_factor=config.threshold_factor,
+            temperature=config.ternary_temperature,
             dropout=config.dropout,
         )
     
@@ -105,6 +107,7 @@ class TernaryTransformer(nn.Module):
         super().__init__()
         
         self.config = config
+        self.ternary_enabled = True
         
         # Token embeddings (kept in BF16)
         self.embed = Embedding(config.vocab_size, config.d_model)
@@ -126,6 +129,7 @@ class TernaryTransformer(nn.Module):
             config.d_model,
             config.vocab_size,
             threshold_factor=config.threshold_factor,
+            temperature=config.ternary_temperature,
         )
     
     def __call__(
@@ -172,6 +176,24 @@ class TernaryTransformer(nn.Module):
         logits = self.lm_head(x)
         
         return logits, new_cache
+    
+    def set_ternary_enabled(self, enabled: bool):
+        """Enable or disable ternary weights across the model."""
+        self.ternary_enabled = enabled
+        for _, module in self.named_modules():
+            if isinstance(module, TernaryLinear):
+                module.set_ternary_enabled(enabled)
+    
+    def set_ternary_strength(self, strength: float):
+        """
+        Set blend factor for ternary weights across the model.
+        
+        strength=0 uses full-precision weights, strength=1 uses ternary.
+        """
+        clamped = max(0.0, min(1.0, float(strength)))
+        for _, module in self.named_modules():
+            if isinstance(module, TernaryLinear):
+                module.set_ternary_strength(clamped)
     
     def forward_with_checkpointing(
         self,
@@ -324,14 +346,9 @@ class TernaryTransformer(nn.Module):
             prefix = f"{name}." if name else ""
 
             if isinstance(module, TernaryLinear):
-                w_count = module.weight_int8.size
+                w_count = module.weight.size
                 total += w_count
                 breakdown[f"{prefix}weight"] = w_count
-
-                # Scales are small but stored alongside weights
-                scale_count = module.scale.size
-                total += scale_count
-                breakdown[f"{prefix}scale"] = scale_count
 
                 if module.bias is not None:
                     b_count = module.bias.size

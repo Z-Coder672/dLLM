@@ -23,41 +23,51 @@ def generate_text(
     tokenizer,
     prompt: str,
     max_tokens: int = 200,
-    temperature: float = 0.8,
-    top_k: int = 50,
-    top_p: float = 0.9,
+    temperature: float = 1.0,
 ) -> str:
     """
-    Generate text from a prompt.
+    Generate text from a prompt using simple sampling.
     
     Args:
         model: The trained model
         tokenizer: Tokenizer
         prompt: Input prompt
         max_tokens: Maximum tokens to generate
-        temperature: Sampling temperature (higher = more random)
-        top_k: Top-k sampling parameter
-        top_p: Nucleus sampling parameter
+        temperature: Sampling temperature (1.0 = unmodified, <1 = focused, >1 = random)
         
     Returns:
-        Generated text
+        Generated text (WITHOUT the prompt)
     """
     # Tokenize prompt
     input_ids = tokenizer.encode(prompt)
-    input_ids = mx.array([input_ids])  # Add batch dimension
+    prompt_length = len(input_ids)
+    input_ids = mx.array([input_ids])
     
-    # Generate
-    output_ids = model.generate(
-        input_ids,
-        max_new_tokens=max_tokens,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-    )
+    # Generate tokens one at a time
+    for _ in range(max_tokens):
+        # Get logits for next token
+        logits, _ = model(input_ids, training=False)
+        next_token_logits = logits[:, -1, :]  # Shape: (1, vocab_size)
+        
+        # Apply temperature
+        if temperature != 1.0:
+            next_token_logits = next_token_logits / temperature
+        
+        # Sample from distribution
+        probs = mx.softmax(next_token_logits, axis=-1)
+        next_token = mx.random.categorical(mx.log(probs + 1e-10))
+        next_token = next_token[:, None]  # Add sequence dimension
+        
+        # Append to sequence
+        input_ids = mx.concatenate([input_ids, next_token], axis=1)
+        
+        # Force evaluation to free memory
+        mx.eval(input_ids)
     
-    # Decode
-    output_ids = output_ids[0].tolist()  # Remove batch dimension
-    text = tokenizer.decode(output_ids)
+    # Decode only the newly generated tokens
+    output_ids = input_ids[0].tolist()
+    new_tokens = output_ids[prompt_length:]
+    text = tokenizer.decode(new_tokens)
     
     return text
 
@@ -80,7 +90,8 @@ def interactive_mode(model, tokenizer, args):
             if not prompt:
                 continue
             
-            print("\nGenerating...\n")
+            print("\nGenerating...")
+            print("-" * 40)
             
             text = generate_text(
                 model=model,
@@ -88,12 +99,10 @@ def interactive_mode(model, tokenizer, args):
                 prompt=prompt,
                 max_tokens=args.max_tokens,
                 temperature=args.temperature,
-                top_k=args.top_k,
-                top_p=args.top_p,
             )
             
-            print("-" * 40)
-            print(text)
+            # Display prompt + generation together
+            print(f"{prompt}{text}")
             print("-" * 40 + "\n")
             
         except KeyboardInterrupt:
@@ -109,14 +118,10 @@ def main():
                         help="Text prompt for generation")
     parser.add_argument("--interactive", action="store_true",
                         help="Run in interactive mode")
-    parser.add_argument("--max-tokens", type=int, default=200,
+    parser.add_argument("--max-tokens", type=int, default=100,
                         help="Maximum tokens to generate")
-    parser.add_argument("--temperature", type=float, default=0.8,
-                        help="Sampling temperature")
-    parser.add_argument("--top-k", type=int, default=50,
-                        help="Top-k sampling parameter")
-    parser.add_argument("--top-p", type=float, default=0.9,
-                        help="Nucleus sampling parameter")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="Sampling temperature (lower=more focused, higher=more random)")
     args = parser.parse_args()
     
     # Load checkpoint
@@ -147,7 +152,8 @@ def main():
         interactive_mode(model, tokenizer, args)
     elif args.prompt:
         print(f"\nPrompt: {args.prompt}")
-        print("\nGenerating...\n")
+        print("\nGenerating...")
+        print("-" * 40)
         
         text = generate_text(
             model=model,
@@ -155,12 +161,10 @@ def main():
             prompt=args.prompt,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
-            top_k=args.top_k,
-            top_p=args.top_p,
         )
         
-        print("-" * 40)
-        print(text)
+        # Display prompt + generation together
+        print(f"{args.prompt}{text}")
         print("-" * 40)
     else:
         print("Error: Provide --prompt or --interactive")
@@ -168,4 +172,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

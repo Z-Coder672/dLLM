@@ -4,4 +4,8 @@ __pycache__/
 *.pyd
 *.so
 .DS_Store
+venv/
+
+# Local backup artifacts
+checkpoints_local_backup/
 

@@ -62,12 +62,13 @@ class TrainingConfig:
     
     # Batch settings
     batch_size: int = 4
-    gradient_accumulation_steps: int = 8
+    gradient_accumulation_steps: int = 2
     
     # Training duration
-    max_steps: int = 100000
+    max_steps: int = 30000
+    stop_steps: int = 0
     eval_interval: int = 500
-    save_interval: int = 1000
+    save_interval: int = 50
     log_interval: int = 10
     
     # INT8 quantization

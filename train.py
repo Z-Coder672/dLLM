@@ -23,7 +23,12 @@ from src.config import ModelConfig, TrainingConfig
 from src.model import TernaryTransformer, create_model
 from src.layers import TernaryLinear
 from src.optimizer import AdamW, get_cosine_schedule_with_warmup, clip_gradients
-from src.checkpoint import save_checkpoint, load_checkpoint, get_latest_checkpoint
+from src.checkpoint import (
+    save_checkpoint,
+    load_checkpoint,
+    get_latest_checkpoint,
+    prune_checkpoints,
+)
 from src.ste import compute_ternary_stats
 from data.dataloader import create_dataloader, Batch, ValidationDataset
 
@@ -348,6 +353,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train Ternary Transformer")
     parser.add_argument("--config", type=str, default="configs/500m.yaml",
                         help="Path to config file")
+    parser.add_argument("-c", "--checkpoint", type=str, default=None,
+                        help="Path to checkpoint to start from")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from")
     parser.add_argument("--auto-resume", action="store_true",
@@ -373,6 +380,8 @@ def main():
     logger.info(f"  effective_batch_size: {training_config.effective_batch_size}")
     logger.info(f"  dataset: {training_config.dataset_name}"
           f"{f'/{training_config.dataset_config}' if training_config.dataset_config else ''}")
+    logger.info(f"  max_steps: {training_config.max_steps}")
+    logger.info(f"  stop_steps: {training_config.stop_steps}")
     
     # Create model
     logger.info("\nCreating model...")
@@ -391,7 +400,12 @@ def main():
     
     # Resume from checkpoint if specified
     start_step = 0
-    if args.resume:
+    if args.checkpoint:
+        logger.info(f"\nLoading checkpoint from {args.checkpoint}")
+        state = load_checkpoint(args.checkpoint, model, optimizer)
+        start_step = state.get("step", 0)
+        logger.info(f"Loaded checkpoint at step {start_step}")
+    elif args.resume:
         logger.info(f"\nResuming from {args.resume}")
         state = load_checkpoint(args.resume, model, optimizer)
         start_step = state.get("step", 0)
@@ -437,9 +451,11 @@ def main():
     tokens_processed = 0
     start_time = time.time()
     last_log_time = start_time
+    # Decide when to stop: only honor stop_steps when it is >0; otherwise run unbounded
+    stop_at = training_config.stop_steps if training_config.stop_steps > 0 else None
     
     for batch in train_loader:
-        if step >= training_config.max_steps:
+        if stop_at is not None and step >= stop_at:
             break
         
         # Enable ternary weights with fade-in schedule
@@ -479,6 +495,7 @@ def main():
             mx.eval(state.m)
             mx.eval(state.v)
         gc.collect()
+        mx.clear_cache()
         
         # Actual step (after gradient accumulation)
         if accumulation_count >= training_config.gradient_accumulation_steps:
@@ -494,6 +511,8 @@ def main():
                 tokens_per_sec = tokens_processed / elapsed if elapsed > 0 else 0
                 
                 perplexity = compute_perplexity(avg_loss)
+                active = mx.get_active_memory() / 1e9
+                peak = mx.get_peak_memory() / 1e9
                 
                 logger.info(f"Step {step:6d} | "
                       f"Loss: {avg_loss:.4f} | "
@@ -501,6 +520,8 @@ def main():
                       f"LR: {lr:.2e} | "
                       f"Grad: {avg_grad_norm:.3f} | "
                       f"Tok/s: {tokens_per_sec:.0f}")
+                logger.info(f"Mem: {active:.2f}GB active, {peak:.2f}GB peak")
+                mx.reset_peak_memory()
                 
                 last_log_time = current_time
                 tokens_processed = 0
@@ -531,6 +552,11 @@ def main():
                     training_config=training_config,
                     metrics={"loss": avg_loss},
                 )
+                prune_checkpoints(
+                    output_dir=training_config.output_dir,
+                    current_step=step,
+                    save_interval=training_config.save_interval,
+                )
             
             # Reset accumulation
             accumulated_loss = 0.0
@@ -539,6 +565,9 @@ def main():
             
             # Free buffers after each completed optimization step
             mx.eval(model.embed.weight)
+            
+            if stop_at is not None and step >= stop_at:
+                break
     
     # Final save
     logger.info("\nTraining complete!")

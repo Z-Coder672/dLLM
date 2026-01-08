@@ -292,8 +292,15 @@ class TernaryTransformer(nn.Module):
             
             # Apply top-k filtering
             if top_k is not None:
-                top_k_logits, top_k_indices = mx.topk(next_logits, k=top_k)
-                next_logits = mx.full_like(next_logits, float("-inf"))
+                top_k = max(1, min(top_k, next_logits.shape[-1]))
+                top_k_result = mx.topk(next_logits, k=top_k)
+                try:
+                    top_k_logits, top_k_indices = top_k_result
+                except ValueError:
+                    # Older/newer MLX may return only logits; derive indices manually
+                    top_k_logits = top_k_result
+                    top_k_indices = mx.argsort(next_logits, axis=-1)[:, -top_k:]
+                next_logits = mx.full(next_logits.shape, float("-inf"), dtype=next_logits.dtype)
                 # Scatter top-k values back
                 for i in range(next_logits.shape[0]):
                     next_logits[i, top_k_indices[i]] = top_k_logits[i]

@@ -258,7 +258,7 @@ def get_cosine_schedule_with_warmup(
         return max_lr * step / warmup_steps
     
     # Cosine decay
-    progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+    progress = min(1.0, (step - warmup_steps) / max(1.0, total_steps - warmup_steps))
     cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
     
     return min_lr + (max_lr - min_lr) * cosine_decay

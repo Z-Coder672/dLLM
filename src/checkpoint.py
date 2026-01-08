@@ -300,13 +300,11 @@ def prune_checkpoints(
     output_dir: str,
     current_step: int,
     save_interval: int,
-    keep_last: int = 5,
 ):
     """
-    Log-spaced thinning with a protected recent window:
-    - Always keep the latest `keep_last` checkpoints (including the current).
-    - For older checkpoints, bucket by floor(log2(age / save_interval)) and
-      keep the newest checkpoint in each bucket.
+    Log-spaced thinning:
+    - Bucket by floor(log2(age / save_interval)) and
+      keep the oldest checkpoint in each bucket.
     """
     checkpoints = list_checkpoints(output_dir)
     if not checkpoints or save_interval <= 0:
@@ -316,31 +314,23 @@ def prune_checkpoints(
     checkpoints = sorted(checkpoints, key=lambda x: x["step"])
 
     keep_paths = set()
-    recent = checkpoints[-keep_last:] if keep_last > 0 else []
 
-    # Always keep the most recent checkpoints
-    for ckpt in recent:
-        keep_paths.add(ckpt["path"])
-
-    # Bucket older checkpoints to thin them out logarithmically
+    # Bucket checkpoints to thin them out logarithmically
     bucket_best = {}
-    older = checkpoints[:-keep_last] if keep_last > 0 else checkpoints
 
-    for ckpt in older:
+    for ckpt in checkpoints:
         step = ckpt["step"]
         path = ckpt["path"]
         age = max(0, current_step - step)
 
-        # Skip any checkpoints already in the recent window
-        if path in keep_paths:
-            continue
-
-        # Bucket by log2 spacing based on how many save intervals ago this is
-        bucket = int(math.floor(math.log2(age / save_interval))) if age > 0 else 0
+        # Bucket by log spacing based on how many save intervals ago this is.
+        # Use base 2.0 for standard log-spaced pruning.
+        log_base = 2.0
+        bucket = int(math.floor(math.log(age / save_interval, log_base))) if age > 0 else 0
         best = bucket_best.get(bucket)
 
-        # Prefer the most recent (highest step) checkpoint in each bucket
-        if best is None or step > best[0]:
+        # Prefer the oldest (lowest step) checkpoint in each bucket
+        if best is None or step < best[0]:
             bucket_best[bucket] = (step, path)
 
     # Add best-per-bucket to keep set

@@ -378,8 +378,14 @@ def main():
     logger.info(f"  batch_size: {training_config.batch_size}")
     logger.info(f"  gradient_accumulation: {training_config.gradient_accumulation_steps}")
     logger.info(f"  effective_batch_size: {training_config.effective_batch_size}")
-    logger.info(f"  dataset: {training_config.dataset_name}"
-          f"{f'/{training_config.dataset_config}' if training_config.dataset_config else ''}")
+    if training_config.datasets:
+        logger.info(f"  datasets (mixed):")
+        for d in training_config.datasets:
+            cfg_str = f" ({d['config']})" if d.get("config") else ""
+            logger.info(f"    - {d['name']}{cfg_str}: weight {d.get('weight', 1.0)}")
+    else:
+        logger.info(f"  dataset: {training_config.dataset_name}"
+              f"{f'/{training_config.dataset_config}' if training_config.dataset_config else ''}")
     logger.info(f"  max_steps: {training_config.max_steps}")
     logger.info(f"  stop_steps: {training_config.stop_steps}")
     
@@ -393,10 +399,21 @@ def main():
     logger.info(f"Total parameters: {total_params:,} ({total_params / 1e6:.1f}M)")
     
     # Create optimizer
-    optimizer = AdamW(
-        learning_rate=training_config.learning_rate,
-        weight_decay=training_config.weight_decay,
-    )
+    if training_config.optimizer.lower() == "adamw":
+        optimizer = AdamW(
+            learning_rate=training_config.learning_rate,
+            weight_decay=training_config.weight_decay,
+            betas=tuple(training_config.betas),
+            eps=training_config.eps,
+        )
+    elif training_config.optimizer.lower() == "sgd":
+        from src.optimizer import SGDMomentum
+        optimizer = SGDMomentum(
+            learning_rate=training_config.learning_rate,
+            weight_decay=training_config.weight_decay,
+        )
+    else:
+        raise ValueError(f"Unknown optimizer: {training_config.optimizer}")
     
     # Resume from checkpoint if specified
     start_step = 0
@@ -429,13 +446,19 @@ def main():
         seq_len=training_config.sequence_length,
         dataset_name=training_config.dataset_name,
         dataset_config=training_config.dataset_config,
+        datasets_config=training_config.datasets,
+        streaming=training_config.streaming,
     )
     
+    val_dataset_name = training_config.datasets[0]["name"] if training_config.datasets else training_config.dataset_name
+    val_dataset_config = training_config.datasets[0].get("config") if training_config.datasets else training_config.dataset_config
+
     val_dataset = ValidationDataset(
         num_samples=500,
         seq_len=training_config.sequence_length,
-        dataset_name=training_config.dataset_name,
-        dataset_config=training_config.dataset_config,
+        dataset_name=val_dataset_name,
+        dataset_config=val_dataset_config,
+        streaming=training_config.streaming,
     )
     
     # Training loop
@@ -451,8 +474,8 @@ def main():
     tokens_processed = 0
     start_time = time.time()
     last_log_time = start_time
-    # Decide when to stop: only honor stop_steps when it is >0; otherwise run unbounded
-    stop_at = training_config.stop_steps if training_config.stop_steps > 0 else None
+    # Decide when to stop: honor stop_steps if > 0, otherwise use max_steps
+    stop_at = training_config.stop_steps if training_config.stop_steps > 0 else training_config.max_steps
     
     for batch in train_loader:
         if stop_at is not None and step >= stop_at:

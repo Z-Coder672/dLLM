@@ -113,6 +113,7 @@ class MultiHeadAttention(nn.Module):
         max_seq_len: int = 2048,
         rope_theta: float = 10000.0,
         dropout: float = 0.0,
+        dtype: str = "bfloat16",
     ):
         super().__init__()
         
@@ -121,6 +122,9 @@ class MultiHeadAttention(nn.Module):
         self.n_kv_heads = n_kv_heads or n_heads
         self.head_dim = d_model // n_heads
         self.dropout = dropout
+        
+        # Get MLX dtype
+        mx_dtype = getattr(mx, dtype)
         
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         assert n_heads % self.n_kv_heads == 0, "n_heads must be divisible by n_kv_heads"
@@ -133,29 +137,33 @@ class MultiHeadAttention(nn.Module):
             n_heads * self.head_dim,
             threshold_factor=threshold_factor,
             temperature=temperature,
+            dtype=dtype,
         )
         self.k_proj = TernaryLinear(
             d_model,
             self.n_kv_heads * self.head_dim,
             threshold_factor=threshold_factor,
             temperature=temperature,
+            dtype=dtype,
         )
         self.v_proj = TernaryLinear(
             d_model,
             self.n_kv_heads * self.head_dim,
             threshold_factor=threshold_factor,
             temperature=temperature,
+            dtype=dtype,
         )
         self.o_proj = TernaryLinear(
             n_heads * self.head_dim,
             d_model,
             threshold_factor=threshold_factor,
             temperature=temperature,
+            dtype=dtype,
         )
         
         # Precompute RoPE frequencies
         self.cos, self.sin = precompute_rope_frequencies(
-            self.head_dim, max_seq_len, rope_theta, mx.bfloat16
+            self.head_dim, max_seq_len, rope_theta, mx_dtype
         )
         
         # Scaling factor for attention

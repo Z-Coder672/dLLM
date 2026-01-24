@@ -30,6 +30,7 @@ class TernaryLinear(nn.Module):
         bias: bool = False,
         threshold_factor: float = 0.7,
         temperature: float = 0.15,
+        dtype: str = "bfloat16",
     ):
         super().__init__()
         
@@ -40,18 +41,21 @@ class TernaryLinear(nn.Module):
         self._ternary_enabled = True
         self._ternary_strength = 1.0
         
-        # Initialize weights in BF16
+        # Get MLX dtype
+        mx_dtype = getattr(mx, dtype)
+        
+        # Initialize weights
         scale = 0.01
         self._weight = mx.random.uniform(
             low=-scale,
             high=scale,
             shape=(out_features, in_features),
-            dtype=mx.bfloat16
+            dtype=mx_dtype
         )
         
-        # Optional bias (kept in BF16)
+        # Optional bias
         if bias:
-            self._bias = mx.zeros((out_features,), dtype=mx.bfloat16)
+            self._bias = mx.zeros((out_features,), dtype=mx_dtype)
         else:
             self._bias = None
     
@@ -136,10 +140,11 @@ class RMSNorm(nn.Module):
     output = input * rsqrt(mean(input²) + eps) * scale
     """
     
-    def __init__(self, dims: int, eps: float = 1e-6):
+    def __init__(self, dims: int, eps: float = 1e-6, dtype: str = "bfloat16"):
         super().__init__()
         self.eps = eps
-        self.weight = mx.ones((dims,), dtype=mx.bfloat16)
+        self.mx_dtype = getattr(mx, dtype)
+        self.weight = mx.ones((dims,), dtype=self.mx_dtype)
     
     def __call__(self, x: mx.array) -> mx.array:
         # Compute RMS
@@ -148,7 +153,7 @@ class RMSNorm(nn.Module):
         rms = mx.sqrt(mx.mean(x_f32 * x_f32, axis=-1, keepdims=True) + self.eps)
         
         # Normalize and scale
-        x_norm = (x_f32 / rms).astype(mx.bfloat16)
+        x_norm = (x_f32 / rms).astype(self.mx_dtype)
         return x_norm * self.weight
 
 
@@ -167,6 +172,7 @@ class SwiGLU(nn.Module):
         d_ff: int,
         threshold_factor: float = 0.7,
         temperature: float = 0.15,
+        dtype: str = "bfloat16",
     ):
         super().__init__()
         
@@ -176,12 +182,14 @@ class SwiGLU(nn.Module):
             d_ff,
             threshold_factor=threshold_factor,
             temperature=temperature,
+            dtype=dtype,
         )
         self.w_up = TernaryLinear(
             d_model,
             d_ff,
             threshold_factor=threshold_factor,
             temperature=temperature,
+            dtype=dtype,
         )
         
         # Down projection
@@ -190,6 +198,7 @@ class SwiGLU(nn.Module):
             d_model,
             threshold_factor=threshold_factor,
             temperature=temperature,
+            dtype=dtype,
         )
     
     def __call__(self, x: mx.array) -> mx.array:
@@ -223,9 +232,10 @@ class FeedForward(nn.Module):
         threshold_factor: float = 0.7,
         temperature: float = 0.15,
         dropout: float = 0.0,
+        dtype: str = "bfloat16",
     ):
         super().__init__()
-        self.swiglu = SwiGLU(d_model, d_ff, threshold_factor, temperature)
+        self.swiglu = SwiGLU(d_model, d_ff, threshold_factor, temperature, dtype=dtype)
         self.dropout = dropout
     
     def __call__(self, x: mx.array, training: bool = False) -> mx.array:
@@ -244,15 +254,16 @@ class Embedding(nn.Module):
     Kept in BF16 (not quantized) for better gradient signal.
     """
     
-    def __init__(self, vocab_size: int, d_model: int):
+    def __init__(self, vocab_size: int, d_model: int, dtype: str = "bfloat16"):
         super().__init__()
         # Initialize with small values
         scale = 1.0 / math.sqrt(d_model)
+        mx_dtype = getattr(mx, dtype)
         self.weight = mx.random.uniform(
             low=-scale,
             high=scale,
             shape=(vocab_size, d_model),
-            dtype=mx.bfloat16
+            dtype=mx_dtype
         )
     
     def __call__(self, x: mx.array) -> mx.array:

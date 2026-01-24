@@ -34,7 +34,7 @@ class TransformerBlock(nn.Module):
         self.layer_idx = layer_idx
         
         # Pre-attention norm
-        self.attn_norm = RMSNorm(config.d_model)
+        self.attn_norm = RMSNorm(config.d_model, dtype=config.dtype)
         
         # Multi-head attention
         self.attention = MultiHeadAttention(
@@ -45,10 +45,11 @@ class TransformerBlock(nn.Module):
             max_seq_len=config.max_seq_len,
             rope_theta=config.rope_theta,
             dropout=config.dropout,
+            dtype=config.dtype,
         )
         
         # Pre-FFN norm
-        self.ffn_norm = RMSNorm(config.d_model)
+        self.ffn_norm = RMSNorm(config.d_model, dtype=config.dtype)
         
         # Feed-forward network
         self.ffn = FeedForward(
@@ -57,6 +58,7 @@ class TransformerBlock(nn.Module):
             threshold_factor=config.threshold_factor,
             temperature=config.ternary_temperature,
             dropout=config.dropout,
+            dtype=config.dtype,
         )
     
     def __call__(
@@ -110,7 +112,7 @@ class TernaryTransformer(nn.Module):
         self.ternary_enabled = True
         
         # Token embeddings (kept in BF16)
-        self.embed = Embedding(config.vocab_size, config.d_model)
+        self.embed = Embedding(config.vocab_size, config.d_model, dtype=config.dtype)
         
         # Transformer blocks
         self.layers = []
@@ -121,7 +123,7 @@ class TernaryTransformer(nn.Module):
             self.layers.append(layer)
         
         # Final normalization
-        self.norm = RMSNorm(config.d_model)
+        self.norm = RMSNorm(config.d_model, dtype=config.dtype)
         
         # Output projection (can tie weights with embeddings)
         # Using ternary for output projection
@@ -130,6 +132,7 @@ class TernaryTransformer(nn.Module):
             config.vocab_size,
             threshold_factor=config.threshold_factor,
             temperature=config.ternary_temperature,
+            dtype=config.dtype,
         )
     
     def __call__(

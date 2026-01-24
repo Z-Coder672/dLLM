@@ -52,11 +52,15 @@ class TrainingConfig:
     """Configuration for training."""
     
     # Optimization
+    optimizer: str = "adamw"
     learning_rate: float = 1e-4
     min_learning_rate: float = 1e-5
     warmup_steps: int = 5000
     weight_decay: float = 0.1
+    betas: list = field(default_factory=lambda: [0.9, 0.999])
+    eps: float = 1e-8
     gradient_clip: float = 0.5
+    lr_schedule: str = "cosine"
     ternary_skip_steps: int = 1000
     ternary_fadein_steps: int = 0
     
@@ -78,9 +82,11 @@ class TrainingConfig:
     checkpoint_layers: int = 6  # Checkpoint every N layers
     
     # Data
+    datasets: Optional[list] = None  # List of dicts: {"name": ..., "config": ..., "weight": ...}
     dataset_name: str = "wikitext"
     dataset_config: Optional[str] = "wikitext-103-raw-v1"
     sequence_length: int = 1024
+    streaming: bool = True
     
     # Paths
     output_dir: str = "checkpoints"
@@ -88,6 +94,10 @@ class TrainingConfig:
     @property
     def effective_batch_size(self) -> int:
         return self.batch_size * self.gradient_accumulation_steps
+    
+    @property
+    def effective_batch_tokens(self) -> int:
+        return self.effective_batch_size * self.sequence_length
     
     @classmethod
     def from_yaml(cls, path: str) -> "TrainingConfig":
@@ -118,4 +128,3 @@ CONFIG_1B = ModelConfig(
     vocab_size=50257,
     max_seq_len=2048,
 )
-

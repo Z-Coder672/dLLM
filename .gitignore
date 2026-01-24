@@ -9,3 +9,4 @@ venv/
 # Local backup artifacts
 checkpoints_local_backup/
 
+checkpoints/

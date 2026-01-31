@@ -229,6 +229,29 @@ def apply_ternary_schedule(
     return strength
 
 
+def get_lr(step: int, config: TrainingConfig) -> float:
+    """Get learning rate based on schedule."""
+    if config.lr_schedule.lower() == "cosine":
+        return get_cosine_schedule_with_warmup(
+            step,
+            config.warmup_steps,
+            config.max_steps,
+            config.min_learning_rate,
+            config.learning_rate,
+        )
+    elif config.lr_schedule.lower() == "constant":
+        return config.learning_rate if step >= config.warmup_steps else config.learning_rate * step / config.warmup_steps
+    else:
+        # Default to cosine
+        return get_cosine_schedule_with_warmup(
+            step,
+            config.warmup_steps,
+            config.max_steps,
+            config.min_learning_rate,
+            config.learning_rate,
+        )
+
+
 def train_step(
     model: TernaryTransformer,
     optimizer: AdamW,
@@ -458,7 +481,6 @@ def main():
         seq_len=training_config.sequence_length,
         dataset_name=val_dataset_name,
         dataset_config=val_dataset_config,
-        streaming=training_config.streaming,
     )
     
     # Training loop
@@ -485,13 +507,7 @@ def main():
         _ = apply_ternary_schedule(model, step, training_config)
         
         # Get learning rate
-        lr = get_cosine_schedule_with_warmup(
-            step,
-            training_config.warmup_steps,
-            training_config.max_steps,
-            training_config.min_learning_rate,
-            training_config.learning_rate,
-        )
+        lr = get_lr(step, training_config)
         
         # Training step
         loss, grad_norm = train_step(

@@ -10,3 +10,6 @@ venv/
 checkpoints_local_backup/
 
 checkpoints/
+checkpoints/
+checkpoints/
+*.log

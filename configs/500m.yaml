@@ -22,10 +22,10 @@ training:
   # OPTIMIZER & LEARNING RATE - CONSENSUS SETTINGS
   # ============================================================================
   optimizer: adamw                 # Explicit optimizer specification
-  learning_rate: 0.0005            # 5e-4: Balanced between speed and stability
+  learning_rate: 0.0003            # 5e-4: Balanced between speed and stability
   min_learning_rate: 0.00001       # 1e-5: Lower floor for sharper final decay
   weight_decay: 0.01               # CRITICAL FIX: Down from 0.1
-  betas: [0.9, 0.998]               # Modern LLM practice (LLaMA-style)
+  betas: [0.9, 0.9995]               # Modern LLM practice (LLaMA-style)
   eps: 1.0e-8                      # Standard epsilon
   gradient_clip: 1.0               # Up from 0.5 for more stability headroom
   

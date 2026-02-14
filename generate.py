@@ -22,14 +22,7 @@ from data.dataloader import get_tokenizer
 
 def sample_top_p(logits: mx.array, top_p: float) -> mx.array:
     """
-    Nucleus (top-p) sampling - FAST MLX version.
-    
-    Args:
-        logits: Shape (vocab_size,) - logits for next token
-        top_p: Cumulative probability threshold
-        
-    Returns:
-        Filtered logits with low-probability tokens set to -inf
+    Nucleus (top-p) sampling - FIXED version.
     """
     # Convert to probabilities
     probs = mx.softmax(logits, axis=-1)
@@ -41,26 +34,20 @@ def sample_top_p(logits: mx.array, top_p: float) -> mx.array:
     # Cumulative sum
     cumsum_probs = mx.cumsum(sorted_probs, axis=-1)
     
-    # Find cutoff: keep tokens until cumsum exceeds top_p
-    # But always keep at least the first token
-    cutoff_idx = mx.argmax((cumsum_probs > top_p).astype(mx.int32))
-    if cutoff_idx.item() == 0:
-        # If first token already exceeds top_p, keep it anyway
-        cutoff_idx = mx.array(1)
+    # Find where cumsum first exceeds top_p
+    # Keep all tokens UP TO AND INCLUDING this point
+    remove_mask = cumsum_probs > top_p
     
-    # Create mask for tokens to keep
-    keep_mask = mx.arange(len(probs)) <= cutoff_idx
+    # Shift right by 1 to keep the first token that crosses threshold
+    if len(remove_mask) > 1:
+        remove_mask = mx.concatenate([mx.array([False]), remove_mask[:-1]])
     
     # Apply mask in sorted order
     sorted_logits = logits[sorted_indices]
-    sorted_logits = mx.where(keep_mask, sorted_logits, -float('inf'))
+    sorted_logits = mx.where(remove_mask, -float('inf'), sorted_logits)
     
-    # Scatter back to original order using fancy indexing
-    # This is the key: we need to unsort the filtered logits
-    result = mx.zeros_like(logits) - float('inf')
-    # MLX supports scatter through index assignment in a roundabout way
-    # We'll use the fact that sorted_indices tells us where each position goes
-    scatter_indices = mx.argsort(sorted_indices)  # Inverse permutation
+    # Scatter back to original order
+    scatter_indices = mx.argsort(sorted_indices)
     result = sorted_logits[scatter_indices]
     
     return result

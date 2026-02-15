@@ -58,6 +58,7 @@ def generate_streaming(
     temperature: float = 0.3,
     top_k: int = 40,
     top_p: float = 0.9,
+    rep_penalty: float = 1.2,
 ):
     """Generate tokens one at a time, printing as they're produced."""
     # Print prompt in dim color, then generate in default color
@@ -77,6 +78,13 @@ def generate_streaming(
     for _ in range(max_new_tokens):
         # Sample from the last position's logits
         next_logits = logits[:, -1, :].astype(mx.float32)
+
+        # Repetition penalty
+        if rep_penalty != 1.0 and (input_ids or generated_tokens):
+            seen = mx.array(input_ids + generated_tokens)
+            scored = next_logits[0, seen]
+            scored = mx.where(scored > 0, scored / rep_penalty, scored * rep_penalty)
+            next_logits[0, seen] = scored
 
         # Temperature
         if temperature > 0:
@@ -186,6 +194,13 @@ def interactive_mode(model, tokenizer, config, args):
         for _ in range(gen_limit):
             next_logits = logits[:, -1, :].astype(mx.float32)
 
+            # Repetition penalty
+            if args.rep_penalty != 1.0 and (history_tokens or response_tokens):
+                seen = mx.array(history_tokens + response_tokens)
+                scored = next_logits[0, seen]
+                scored = mx.where(scored > 0, scored / args.rep_penalty, scored * args.rep_penalty)
+                next_logits[0, seen] = scored
+
             if args.temperature > 0:
                 next_logits = next_logits / args.temperature
             else:
@@ -256,6 +271,8 @@ def main():
                         help="Nucleus sampling threshold (default: 0.9)")
     parser.add_argument("--top-k", type=int, default=40,
                         help="Top-k filtering (default: 40, 0 = disabled)")
+    parser.add_argument("--rep-penalty", type=float, default=1.2,
+                        help="Repetition penalty (default: 1.2, 1.0 = disabled)")
     parser.add_argument("--max-tokens", type=int, default=None,
                         help="Max tokens to generate (default: fill context window)")
     args = parser.parse_args()
@@ -291,6 +308,7 @@ def main():
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,
+            rep_penalty=args.rep_penalty,
         )
         elapsed = time.time() - start
         n = len(gen_tokens)

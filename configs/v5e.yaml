@@ -1,0 +1,79 @@
+# 500M Parameter Transformer Configuration for Google Colab v5e TPU
+# Optimized for high-throughput training on v5e with 8 chips
+# Full BF16 precision (no ternary quantization)
+
+model:
+  d_model: 1024
+  n_layers: 24
+  n_heads: 16
+  d_ff: 4096
+  vocab_size: 50257
+  max_seq_len: 512              # Sequence length
+  threshold_factor: 0            # Disabled for full precision
+  ternary_temperature: 0         # Disabled for full precision
+  dropout: 0.0                   # No dropout for pre-training
+  rope_theta: 10000.0           # Standard RoPE theta
+  dtype: bfloat16
+
+training:
+  # ============================================================================
+  # OPTIMIZER & LEARNING RATE
+  # ============================================================================
+  optimizer: adamw
+  learning_rate: 5.0e-4          # Standard for 500M LLMs
+  min_learning_rate: 1.0e-5      # Final floor for cosine annealing
+  weight_decay: 0.01             # L2 regularization
+  betas: [0.9, 0.98]             # Beta2=0.98 for stability with large batches
+                                  # (modern LLM research: 0.95-0.99 range)
+  eps: 1.0e-8                    # Standard epsilon
+  gradient_clip: 1.0             # Gradient clipping threshold
+  
+  # ============================================================================
+  # LEARNING RATE SCHEDULE
+  # ============================================================================
+  lr_schedule: "cosine"          # Cosine annealing with warmup
+  warmup_steps: 2000             # 2k steps warmup
+  max_steps: 1000000             # Indefinite training (stop manually)
+  stop_steps: 0                  # Disabled
+  
+  # ============================================================================
+  # BATCHING & MEMORY STRATEGY FOR v5e TPU
+  # ============================================================================
+  # v5e: 16GB per chip, 8 chips = ~128GB total
+  # 500M model in BF16 ≈ 1GB, leaving ~127GB for activations/gradients
+  batch_size: 48                 # Per-chip batch size (conservative)
+  gradient_accumulation_steps: 1 # No accumulation needed
+  sequence_length: 512           # Token length
+  
+  # Effective batch: 48 × 1 × 512 = 24,576 tokens/step (excellent for convergence)
+  
+  # ============================================================================
+  # TERNARY SETTINGS (DISABLED FOR FULL BF16)
+  # ============================================================================
+  ternary_skip_steps: 999999999999999999999999999999999999999999
+  ternary_fadein_steps: 1000000000
+  
+  # ============================================================================
+  # CHECKPOINTING & LOGGING
+  # ============================================================================
+  eval_interval: 1000            # Evaluate every 1k steps
+  save_interval: 1000            # Save checkpoints every 1k steps
+  log_interval: 20               # Log metrics every 20 steps
+  scale_update_interval: 500     # N/A for full precision, kept for compatibility
+  checkpoint_layers: 4           # Gradient checkpointing (1 out of 4 layers)
+  
+  # ============================================================================
+  # DATA CONFIGURATION
+  # ============================================================================
+  datasets:
+    - name: "HuggingFaceTB/cosmopedia-v2"
+      config: "cosmopedia-v2"
+      weight: 0.5                # 50% synthetic educational data
+    - name: "mlfoundations/dclm-baseline-1.0"
+      weight: 0.3                # 30% curated web data
+    - name: "HuggingFaceFW/fineweb-edu"
+      config: "sample-10BT"
+      weight: 0.2                # 20% educational web data
+  
+  streaming: true                # Stream from HuggingFace Hub
+  output_dir: /content/gdrive/MyDrive/checkpoints/500m_v5e

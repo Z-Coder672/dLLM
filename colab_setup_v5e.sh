@@ -1,11 +1,22 @@
 #!/bin/bash
-# Setup script for v5e TPU training in Google Colab
+# Setup script for single v5e TPU training in Google Colab
 # Run this in Colab cells before training
+
+REPO="https://raw.githubusercontent.com/Z-Coder672/dLLM/main"
+DEST="/content/dLLM"
 
 echo "=== v5e TPU Training Setup ==="
 echo ""
 
+# Download only the files needed for v5e training
+echo "Downloading training files from GitHub..."
+mkdir -p "$DEST/configs"
+curl -fsSL "$REPO/train_v5e_complete.py" -o "$DEST/train_v5e_complete.py"
+curl -fsSL "$REPO/configs/v5e.yaml"       -o "$DEST/configs/v5e.yaml"
+echo "Downloaded train_v5e_complete.py and configs/v5e.yaml"
+
 # Install JAX for TPU
+echo ""
 echo "Installing JAX for TPU..."
 pip install -q jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
@@ -30,11 +41,14 @@ except:
     pass
 EOF
 
+# Mount Google Drive for checkpoints
+echo ""
+echo "Mounting Google Drive..."
+python3 -c "from google.colab import drive; drive.mount('/content/gdrive')"
+
 echo ""
 echo "Setup complete! Ready for training."
 echo ""
-echo "Next steps:"
-echo "1. Mount Google Drive: from google.colab import drive; drive.mount('/content/gdrive')"
-echo "2. Clone/upload your dLLM repo to /content"
-echo "3. Run: python /content/dLLM/train_v5e.py --config /content/dLLM/configs/v5e.yaml"
+echo "Next step:"
+echo "  python /content/dLLM/train_v5e_complete.py --config /content/dLLM/configs/v5e.yaml"
 echo ""

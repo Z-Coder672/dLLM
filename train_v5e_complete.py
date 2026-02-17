@@ -655,6 +655,196 @@ def get_learning_rate(step: int, config: Dict[str, Any]) -> float:
 
 
 # ============================================================================
+# JAX-COMPATIBLE DATA LOADING
+# ============================================================================
+
+def _get_tokenizer():
+    """Get GPT-2 tokenizer."""
+    import tiktoken
+    return tiktoken.get_encoding("gpt2")
+
+
+def _load_hf_dataset(dataset_name, dataset_config=None, split="train", shuffle_buffer=10000, seed=42):
+    """Load a single HuggingFace dataset with streaming."""
+    from datasets import DownloadConfig, load_dataset
+    import os
+
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "120")
+    os.environ.setdefault("HF_HUB_HTTP_TIMEOUT", "120")
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
+
+    download_config = DownloadConfig(max_retries=5)
+
+    kwargs = dict(split=split, streaming=True, download_config=download_config)
+    if dataset_config:
+        ds = load_dataset(dataset_name, dataset_config, **kwargs)
+    else:
+        ds = load_dataset(dataset_name, **kwargs)
+
+    if shuffle_buffer > 0:
+        ds = ds.shuffle(buffer_size=shuffle_buffer, seed=seed)
+    return ds
+
+
+def _packed_sequence_iter(dataset_iter, tokenizer, seq_len):
+    """Pack tokenized text into fixed-length sequences (seq_len+1 for labels shift)."""
+    eos = tokenizer.encode("<|endoftext|>", allowed_special={"<|endoftext|>"})[0]
+    buf = []
+    for example in dataset_iter:
+        text = example.get("text", "")
+        if not text:
+            continue
+        tokens = tokenizer.encode(text)
+        tokens.append(eos)
+        buf.extend(tokens)
+        while len(buf) >= seq_len + 1:
+            yield buf[:seq_len + 1]
+            buf = buf[seq_len:]
+
+
+def create_jax_dataloader(
+    datasets_config,
+    dataset_name="wikitext",
+    dataset_config="wikitext-103-raw-v1",
+    batch_size=8,
+    seq_len=512,
+    shuffle_buffer=10000,
+):
+    """
+    Create a streaming batch iterator yielding JAX-compatible dicts.
+
+    Each batch is a dict with:
+        'input_ids': jnp.array int32 (batch_size, seq_len)
+        'labels':    jnp.array int32 (batch_size, seq_len)
+    """
+    import random as _random
+
+    tokenizer = _get_tokenizer()
+
+    if datasets_config:
+        # Weighted mixture of multiple datasets
+        total_w = sum(d.get("weight", 1.0) for d in datasets_config)
+        weights = [d.get("weight", 1.0) / total_w for d in datasets_config]
+        cum_weights = []
+        c = 0.0
+        for w in weights:
+            c += w
+            cum_weights.append(c)
+
+        iterators = []
+        buffers = []
+        for i, cfg in enumerate(datasets_config):
+            ds = _load_hf_dataset(
+                cfg["name"], cfg.get("config"), "train", shuffle_buffer, seed=42 + i,
+            )
+            iterators.append(_packed_sequence_iter(iter(ds), tokenizer, seq_len))
+            buffers.append([])
+
+        def _select():
+            r = _random.random()
+            for i, cw in enumerate(cum_weights):
+                if r <= cw:
+                    return i
+            return len(cum_weights) - 1
+
+        def _next_seq():
+            while True:
+                idx = _select()
+                try:
+                    return next(iterators[idx])
+                except StopIteration:
+                    # Restart that dataset
+                    cfg = datasets_config[idx]
+                    ds = _load_hf_dataset(
+                        cfg["name"], cfg.get("config"), "train", shuffle_buffer, seed=42 + idx,
+                    )
+                    iterators[idx] = _packed_sequence_iter(iter(ds), tokenizer, seq_len)
+                    return next(iterators[idx])
+
+        def _batch_iter():
+            while True:
+                seqs = [_next_seq() for _ in range(batch_size)]
+                arr = np.array(seqs, dtype=np.int32)
+                yield {
+                    'input_ids': jnp.array(arr[:, :-1]),
+                    'labels': jnp.array(arr[:, 1:]),
+                }
+
+        return _batch_iter()
+
+    else:
+        # Single dataset
+        ds = _load_hf_dataset(dataset_name, dataset_config, "train", shuffle_buffer)
+        seq_iter = _packed_sequence_iter(iter(ds), tokenizer, seq_len)
+
+        def _batch_iter():
+            batch_seqs = []
+            for seq in seq_iter:
+                batch_seqs.append(seq)
+                if len(batch_seqs) >= batch_size:
+                    arr = np.array(batch_seqs, dtype=np.int32)
+                    yield {
+                        'input_ids': jnp.array(arr[:, :-1]),
+                        'labels': jnp.array(arr[:, 1:]),
+                    }
+                    batch_seqs = []
+
+        return _batch_iter()
+
+
+def create_jax_validation_set(
+    datasets_config,
+    dataset_name="wikitext",
+    dataset_config="wikitext-103-raw-v1",
+    num_samples=200,
+    seq_len=512,
+    batch_size=8,
+):
+    """
+    Create a fixed list of validation batches (JAX arrays).
+
+    Returns a list of batch dicts, or None if loading fails.
+    """
+    tokenizer = _get_tokenizer()
+
+    # Pick the first dataset for validation
+    if datasets_config:
+        val_name = datasets_config[0]["name"]
+        val_config = datasets_config[0].get("config")
+    else:
+        val_name = dataset_name
+        val_config = dataset_config
+
+    try:
+        ds = _load_hf_dataset(val_name, val_config, "validation", shuffle_buffer=0)
+    except Exception:
+        try:
+            ds = _load_hf_dataset(val_name, val_config, "train", shuffle_buffer=0)
+            ds = ds.skip(100000)
+        except Exception:
+            return None
+
+    sequences = []
+    for seq in _packed_sequence_iter(iter(ds), tokenizer, seq_len):
+        sequences.append(seq)
+        if len(sequences) >= num_samples:
+            break
+
+    if not sequences:
+        return None
+
+    batches = []
+    for i in range(0, len(sequences), batch_size):
+        chunk = sequences[i:i + batch_size]
+        arr = np.array(chunk, dtype=np.int32)
+        batches.append({
+            'input_ids': jnp.array(arr[:, :-1]),
+            'labels': jnp.array(arr[:, 1:]),
+        })
+    return batches
+
+
+# ============================================================================
 # MAIN TRAINING LOOP
 # ============================================================================
 
@@ -733,16 +923,136 @@ def main():
     start_time = time.time()
     last_log_time = start_time
     
-    # Simplified training loop (requires actual dataloader)
-    logger.info("\nTraining loop initialized.")
-    logger.info("To complete training, implement actual dataloader and training step:")
-    logger.info("  1. Load batches from HuggingFace datasets")
-    logger.info("  2. Compute loss using compute_loss()")
-    logger.info("  3. Compute gradients and apply optimizer")
-    logger.info("  4. Save checkpoints every save_interval steps")
-    logger.info("")
-    logger.info("Framework is ready for: indefinite training with checkpoint pruning.")
-    logger.info("Checkpoints saved to Google Drive automatically.")
+    # ----------------------------------------------------------------
+    # Create streaming data loader (JAX-compatible)
+    # ----------------------------------------------------------------
+    logger.info("\nCreating data loaders...")
+    train_loader = create_jax_dataloader(
+        datasets_config=training_config.get('datasets'),
+        dataset_name=training_config.get('dataset_name', 'wikitext'),
+        dataset_config=training_config.get('dataset_config', 'wikitext-103-raw-v1'),
+        batch_size=training_config.get('batch_size', 8),
+        seq_len=model_config.get('max_seq_len', 512),
+        shuffle_buffer=10000,
+    )
+
+    val_loader = create_jax_validation_set(
+        datasets_config=training_config.get('datasets'),
+        dataset_name=training_config.get('dataset_name', 'wikitext'),
+        dataset_config=training_config.get('dataset_config', 'wikitext-103-raw-v1'),
+        num_samples=200,
+        seq_len=model_config.get('max_seq_len', 512),
+        batch_size=training_config.get('batch_size', 8),
+    )
+
+    gradient_clip = training_config.get('gradient_clip', 1.0)
+
+    # Build closures that capture `model` (a static Python object) so that
+    # JAX only traces the pure-function parts (params & batch).
+    def _loss_fn(params, batch):
+        return compute_loss(params, batch, model)
+
+    @jit
+    def loss_and_grads(params, batch):
+        """Compute loss and clipped gradients."""
+        loss, grads = value_and_grad(_loss_fn)(params, batch)
+        grads, grad_norm = clip_gradients(grads, gradient_clip)
+        return loss, grads, grad_norm
+
+    @jit
+    def eval_step(params, batch):
+        """JIT-compiled evaluation step."""
+        return _loss_fn(params, batch)
+
+    # ----------------------------------------------------------------
+    # Training loop
+    # ----------------------------------------------------------------
+    logger.info("\nStarting training loop...")
+    logger.info(f"  batch_size={training_config.get('batch_size', 8)}, "
+                f"seq_len={model_config.get('max_seq_len', 512)}, "
+                f"grad_clip={gradient_clip}")
+    logger.info("-" * 60)
+
+    for batch in train_loader:
+        if step >= max_steps:
+            break
+
+        # Learning rate schedule
+        lr = get_learning_rate(step, training_config)
+
+        # Forward + backward (JIT-compiled)
+        loss, grads, grad_norm = loss_and_grads(model.params, batch)
+        # Optimizer step (outside JIT — mutates optimizer state)
+        model.params = optimizer.update(model.params, grads, lr=lr)
+        # Block until computation finishes so we get real numbers
+        loss_val = float(loss)
+        grad_norm_val = float(grad_norm)
+
+        accumulated_loss += loss_val
+        step_count_since_log += 1
+        tokens_processed += batch['input_ids'].shape[0] * batch['input_ids'].shape[1]
+        step += 1
+
+        # ----- Logging -----
+        if step % log_interval == 0:
+            avg_loss = accumulated_loss / step_count_since_log
+            ppl = compute_perplexity(avg_loss)
+            now = time.time()
+            elapsed = now - last_log_time
+            tok_per_sec = tokens_processed / elapsed if elapsed > 0 else 0
+
+            logger.info(
+                f"Step {step:6d} | Loss: {avg_loss:.4f} | PPL: {ppl:.2f} | "
+                f"LR: {lr:.2e} | Grad: {grad_norm_val:.3f} | "
+                f"Tok/s: {tok_per_sec:.0f}"
+            )
+
+            accumulated_loss = 0.0
+            step_count_since_log = 0
+            tokens_processed = 0
+            last_log_time = now
+
+        # ----- Evaluation -----
+        if step % eval_interval == 0 and val_loader:
+            logger.info("\nRunning evaluation...")
+            val_losses = []
+            for val_batch in val_loader:
+                vl = eval_step(model.params, val_batch)
+                val_losses.append(float(vl))
+            val_loss = sum(val_losses) / len(val_losses) if val_losses else 0.0
+            val_ppl = compute_perplexity(val_loss)
+            logger.info(f"  Val Loss: {val_loss:.4f} | Val PPL: {val_ppl:.2f}\n")
+
+        # ----- Checkpointing -----
+        if step % save_interval == 0:
+            ckpt_path = str(Path(output_dir) / f"step_{step}")
+            save_checkpoint(
+                path=ckpt_path,
+                params=model.params,
+                optimizer=optimizer,
+                step=step,
+                model_config=model_config,
+                training_config=training_config,
+            )
+            prune_checkpoints(output_dir, step, save_interval)
+
+        # Periodically free memory
+        if step % 100 == 0:
+            gc.collect()
+
+    # Final checkpoint
+    logger.info("\nTraining complete!")
+    final_path = str(Path(output_dir) / "final")
+    save_checkpoint(
+        path=final_path,
+        params=model.params,
+        optimizer=optimizer,
+        step=step,
+        model_config=model_config,
+        training_config=training_config,
+    )
+    total_time = time.time() - start_time
+    logger.info(f"Total training time: {total_time / 3600:.2f} hours")
 
 
 if __name__ == "__main__":

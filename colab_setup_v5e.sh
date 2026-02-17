@@ -2,7 +2,7 @@
 # Setup script for single v5e TPU training in Google Colab
 # Run this in Colab cells before training
 
-REPO="https://raw.githubusercontent.com/Z-Coder672/dLLM/main"
+REPO="https://raw.githubusercontent.com/Z-Coder672/dLLM/v5e-tpu-training"
 DEST="/content/dLLM"
 
 echo "=== v5e TPU Training Setup ==="
@@ -41,14 +41,10 @@ except:
     pass
 EOF
 
-# Mount Google Drive for checkpoints
-echo ""
-echo "Mounting Google Drive..."
-python3 -c "from google.colab import drive; drive.mount('/content/gdrive')"
-
 echo ""
 echo "Setup complete! Ready for training."
 echo ""
-echo "Next step:"
-echo "  python /content/dLLM/train_v5e_complete.py --config /content/dLLM/configs/v5e.yaml"
+echo "Next steps (run in separate Colab cells):"
+echo "  1. from google.colab import drive; drive.mount('/content/gdrive')"
+echo "  2. !python /content/dLLM/train_v5e_complete.py --config /content/dLLM/configs/v5e.yaml"
 echo ""

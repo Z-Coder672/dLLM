@@ -463,7 +463,7 @@ def clip_gradients(
             return tree * scale if tree is not None else None
     
     clipped = clip_tree(grads)
-    return clipped, float(norm)
+    return clipped, norm
 
 
 # ============================================================================

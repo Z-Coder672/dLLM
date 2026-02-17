@@ -6,8 +6,8 @@ This guide covers training a 500M parameter Transformer model on Google Colab's 
 
 **Key Specs:**
 - **Model**: 500M parameters, full BF16 precision
-- **Hardware**: Google Colab v5e TPU (8 chips, ~128GB total memory)
-- **Batch Size**: 48 per-chip (effective: 24,576 tokens/step)
+- **Hardware**: Google Colab v5e TPU (single chip, 16GB memory)
+- **Batch Size**: 8 (effective: 4,096 tokens/step)
 - **Learning Rate**: 5e-4 with cosine annealing
 - **Beta2**: 0.98 (optimized for large batches, modern LLM research)
 - **Checkpoints**: Saved to Google Drive every 1k steps
@@ -32,7 +32,7 @@ model:
 training:
   learning_rate: 5.0e-4
   betas: [0.9, 0.98]          # Beta2=0.98 for stability
-  batch_size: 48               # Per-chip batch size
+  batch_size: 8                # Per-chip batch size
   sequence_length: 512
   save_interval: 1000          # Save every 1k steps
   eval_interval: 1000
@@ -40,7 +40,7 @@ training:
 ```
 
 **Design Rationale:**
-- **Batch Size 48**: Conservative estimate for 500M model in BF16. v5e can typically handle 64-128, but 48 ensures stability during long training runs.
+- **Batch Size 8**: Conservative estimate for 500M model in BF16 on a single 16GB chip. Try 12 or 16 if no OOM.
 - **Beta2 = 0.98**: Modern LLM practice (LLaMA, Chinchilla) uses 0.95-0.99 range. 0.98 provides good momentum for convergence while maintaining stability.
 - **Sequence Length 512**: Balances memory efficiency with context.
 - **Learning Rate 5e-4**: Standard for 500M models. Will decay to 1e-5 minimum via cosine schedule.
@@ -57,7 +57,7 @@ training:
 
 2. **Request v5e TPU**:
    ```
-   Runtime → Change runtime type → TPU v5e-256 (or available v5e variant)
+   Runtime → Change runtime type → TPU v5e
    ```
 
 3. **Run setup cells**:
@@ -79,7 +79,7 @@ training:
    import subprocess
    import os
    os.chdir('/content/dLLM')
-   subprocess.run(['python', 'train_v5e.py', '--config', 'configs/v5e.yaml'])
+   subprocess.run(['python', 'train_v5e_complete.py', '--config', 'configs/v5e.yaml'])
    ```
 
 5. **Resume training** (after runtime reconnection):
@@ -88,7 +88,7 @@ training:
    import os
    os.chdir('/content/dLLM')
    subprocess.run([
-       'python', 'train_v5e.py', 
+       'python', 'train_v5e_complete.py', 
        '--config', 'configs/v5e.yaml',
        '--auto-resume'  # Auto-finds latest checkpoint
    ])
@@ -160,24 +160,23 @@ All streamed from HuggingFace (no local storage needed).
 
 ### Memory Usage
 
-On v5e with batch_size=48:
+On single v5e chip with batch_size=8:
 - **Model**: ~1GB (500M params × 2 bytes BF16)
-- **Activations**: ~20-30GB per chip
-- **Optimizer state** (FP32 moments): ~2GB per chip
-- **Total**: ~25-35GB per chip (fits in 16GB with recomputation)
+- **Activations**: ~5-8GB
+- **Optimizer state** (FP32 moments): ~2GB
+- **Total**: ~8-11GB (fits in 16GB)
 
 ### Throughput
 
-Approximate tokens/second on v5e:
+Approximate tokens/second on single v5e chip:
 - **Per chip**: 2k-4k tokens/sec (varies by sequence length)
-- **Full TPU (8 chips)**: 16k-32k tokens/sec
-- **Effective**: ~20k tokens/sec realistic estimate
+- **Effective**: ~3k tokens/sec realistic estimate
 
 ### Training Time
 
-For 100B tokens (typical pre-training):
+For 10B tokens (feasible on single chip):
 ```
-100B tokens / 20k tokens/sec ≈ 5M seconds ≈ 58 days
+10B tokens / 3k tokens/sec ≈ 3.3M seconds ≈ 39 days
 ```
 
 **For indefinite training**: Set no max_steps and manually stop when desired.
@@ -231,7 +230,7 @@ The choice of **beta2=0.98** is based on recent LLM literature:
 2. Larger batch sizes stabilize training
 3. Cosine schedule dampens later-stage updates
 
-Our v5e setup (batch_size=48, effective 24k tokens/step) supports the higher beta2.
+Our v5e setup (batch_size=8, effective 4k tokens/step) supports the higher beta2.
 
 ---
 
@@ -241,7 +240,7 @@ To modify training:
 
 1. **Edit `configs/v5e.yaml`**:
    ```yaml
-   batch_size: 64              # Increase batch (if no OOM)
+   batch_size: 12              # Increase batch (if no OOM)
    learning_rate: 6.0e-4       # Increase LR
    gradient_accumulation_steps: 2  # Enable accumulation
    ```
@@ -249,7 +248,7 @@ To modify training:
 2. **Re-run training**:
    ```python
    subprocess.run([
-       'python', 'train_v5e.py',
+       'python', 'train_v5e_complete.py',
        '--config', 'configs/v5e.yaml',
        '--auto-resume'  # Loads from latest checkpoint with new config
    ])
@@ -263,7 +262,7 @@ To modify training:
 dLLM/
 ├── configs/
 │   └── v5e.yaml                 # v5e configuration
-├── train_v5e.py                 # Main training script (JAX)
+
 ├── colab_train_v5e.ipynb        # Jupyter notebook for Colab
 ├── colab_setup_v5e.sh           # Setup bash script
 └── README_V5E.md                # This file
@@ -275,7 +274,7 @@ dLLM/
 
 This implementation uses **JAX + Flax** instead of MLX because:
 - ✅ Native TPU support (XLA compilation optimizations)
-- ✅ Automatic distributed training across 8 chips
+- ✅ Runs on single TPU chip (no multi-host setup needed)
 - ✅ Pure functional approach avoids state management issues
 - ✅ Better numerical stability for long training runs
 

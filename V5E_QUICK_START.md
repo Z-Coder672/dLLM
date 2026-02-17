@@ -23,7 +23,7 @@ drive.mount('/content/gdrive')
 
 ### Config File
 - **`configs/v5e.yaml`**: Optimized parameters for v5e TPU
-  - Batch size: 48 (optimal for 500M model)
+  - Batch size: 8 (safe for single 16GB chip)
   - LR: 5e-4 (standard for 500M)
   - Beta2: 0.98 (modern LLM research)
   - Save every 1k steps to Google Drive
@@ -37,7 +37,7 @@ drive.mount('/content/gdrive')
   - Google Drive integration
   - Checkpoint pruning (log-spaced)
   
-- **`train_v5e.py`**: Framework/skeleton (use train_v5e_complete.py instead)
+- **`train_v5e_complete.py`**: Full training script with model, optimizer, and checkpointing
 
 ### Colab Integration
 - **`colab_train_v5e.ipynb`**: Ready-to-use Jupyter notebook
@@ -51,12 +51,13 @@ drive.mount('/content/gdrive')
 
 ## Config Choices Explained
 
-### Why batch_size=48?
-- v5e has 8 chips × 16GB = 128GB total
+### Why batch_size=8?
+- Single v5e chip has 16GB memory
 - 500M model in BF16 = ~1GB
-- Activation peaks = ~20-30GB per chip
-- 48 is conservative but reliable for long runs
-- **Try 64 or 32 if needed**
+- Optimizer state = ~2GB
+- Activation peaks = ~5-8GB
+- 8 is conservative but reliable for long runs
+- **Try 12 or 16 if needed**
 
 ### Why LR=5e-4?
 - Standard for 500M models across LLaMA, Chinchilla, others
@@ -113,14 +114,14 @@ Research shows:
 
 ### Memory
 - **Model**: ~1GB (500M params × 2 bytes)
-- **Activations**: ~20-30GB per chip
-- **Optimizer state**: ~2GB per chip
-- **Total**: ~25-35GB per chip (fits!)
+- **Activations**: ~5-8GB
+- **Optimizer state**: ~2GB
+- **Total**: ~8-11GB (fits in 16GB!)
 
 ### Speed
-- **Tokens/sec**: 2-4k per chip (16-32k total)
-- **Realistic throughput**: ~20k tokens/sec
-- **For 100B tokens**: ~58 days continuous
+- **Tokens/sec**: 2-4k on single chip
+- **Realistic throughput**: ~3k tokens/sec
+- **For 10B tokens**: ~39 days continuous
 
 ### Data
 - **Mixed sources**: Cosmopedia-v2 + DCLM + FineWeb-EDU
@@ -139,7 +140,7 @@ Research shows:
 
 ### Out of Memory (OOM)
 ```
-1. Reduce batch_size to 32 or 24
+1. Reduce batch_size to 4 or 6
 2. Reduce sequence_length to 256
 3. Edit configs/v5e.yaml and retry
 ```

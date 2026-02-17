@@ -33,7 +33,6 @@ try:
     import jax
     import jax.numpy as jnp
     from jax import grad, jit, value_and_grad, lax
-    import jax.experimental.pjit
 except ImportError:
     print("ERROR: JAX not installed. Install with: pip install 'jax[tpu]'")
     sys.exit(1)
@@ -46,6 +45,9 @@ from tqdm import tqdm
 # ============================================================================
 # LOGGING & SETUP
 # ============================================================================
+
+logger = None
+
 
 class LoggerWrapper:
     """Wrapper that both prints and logs messages."""
@@ -209,7 +211,7 @@ class TransformerModel:
         # Attention norms and projections
         layer['attn_norm'] = jnp.ones(self.d_model, dtype=self.dtype)
         
-        key, *subkeys = jax.random.split(key, 6)
+        key, *subkeys = jax.random.split(key, 7)
         scale = 1.0 / math.sqrt(self.head_dim)
         
         layer['q_proj'] = jax.random.normal(
@@ -485,8 +487,8 @@ def flatten_dict(d: Dict[str, Any], parent_key: str = '') -> Dict[str, np.ndarra
     return dict(items)
 
 
-def unflatten_dict(d: Dict[str, Any]) -> Dict[str, Any]:
-    """Unflatten dictionary after loading."""
+def unflatten_dict(d: Dict[str, Any], dtype=None) -> Dict[str, Any]:
+    """Unflatten dictionary after loading. If dtype is given, cast arrays to it."""
     result = {}
     for key, value in d.items():
         parts = key.split(FLAT_KEY_SEP)
@@ -496,7 +498,8 @@ def unflatten_dict(d: Dict[str, Any]) -> Dict[str, Any]:
                 current[part] = {}
             current = current[part]
         if isinstance(value, np.ndarray):
-            current[parts[-1]] = jnp.array(value, dtype=jnp.bfloat16)
+            arr = jnp.array(value)
+            current[parts[-1]] = arr.astype(dtype) if dtype is not None else arr
         else:
             current[parts[-1]] = value
     return result
@@ -547,11 +550,11 @@ def load_checkpoint(
     """Load checkpoint from directory."""
     path = Path(path)
     
-    # Load params
+    # Load params (BF16)
     params_flat = dict(np.load(path / "params.npz"))
-    model.params = unflatten_dict(params_flat)
+    model.params = unflatten_dict(params_flat, dtype=jnp.bfloat16)
     
-    # Load optimizer state
+    # Load optimizer state (keep float32 for numerical stability)
     m_flat = dict(np.load(path / "optimizer_m.npz"))
     optimizer.m = unflatten_dict(m_flat)
     
@@ -608,12 +611,19 @@ def prune_checkpoints(output_dir: str, current_step: int, save_interval: int):
         path = ckpt["path"]
         age = max(0, current_step - step)
         
-        log_base = 2.0
-        bucket = int(math.floor(math.log(age / save_interval, log_base))) if age > 0 else 0
+        if age < save_interval:
+            bucket = 0
+        else:
+            bucket = int(math.floor(math.log(age / save_interval, 2.0)))
         best = bucket_best.get(bucket)
         
-        if best is None or step < best[0]:
+        if best is None or step > best[0]:
             bucket_best[bucket] = (step, path)
+    
+    # Always keep the latest checkpoint
+    if checkpoints:
+        latest = max(checkpoints, key=lambda c: c["step"])
+        keep_paths.add(latest["path"])
     
     for _, path in bucket_best.values():
         keep_paths.add(path)

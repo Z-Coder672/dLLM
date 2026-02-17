@@ -40,11 +40,6 @@
   - Log-spaced checkpoint pruning
   - Ready to deploy: `python train_v5e_complete.py --config configs/v5e.yaml`
 
-#### Reference
-- **[train_v5e.py](train_v5e.py)** - Framework skeleton (18KB)
-  - For understanding the overall structure
-  - Missing the actual training loop implementation
-  - Use train_v5e_complete.py instead
 
 ### 📓 COLAB INTEGRATION
 
@@ -72,7 +67,7 @@
 | V5E_SUMMARY.txt | 8.0K | Executive overview | 10 min |
 | configs/v5e.yaml | 3.7K | Training configuration | 3 min |
 | train_v5e_complete.py | 24K | Main training script | - |
-| train_v5e.py | 18K | Framework skeleton | - |
+
 | colab_train_v5e.ipynb | 6.5K | Jupyter notebook | - |
 | colab_setup_v5e.sh | 1.1K | Setup script | - |
 
@@ -195,7 +190,7 @@ dLLM/
 │   └── v5e.yaml                    ← Edit here for hyperparameters
 │
 ├── train_v5e_complete.py           ← Main training script (USE THIS)
-├── train_v5e.py                    ← Framework skeleton (reference)
+
 │
 ├── colab_train_v5e.ipynb           ← Jupyter notebook
 ├── colab_setup_v5e.sh              ← Bash setup script

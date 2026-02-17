@@ -29,7 +29,7 @@ TRAINING SCRIPTS:
     - Log-spaced checkpoint pruning
     - Ready to use: supports --auto-resume
     
-  ✓ train_v5e.py (Framework skeleton - for reference)
+  ✓ train_v5e_complete.py (Full training script)
 
 COLAB INTEGRATION:
   ✓ colab_train_v5e.ipynb

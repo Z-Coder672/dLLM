@@ -1,5 +1,5 @@
 # 500M Parameter Transformer Configuration for Google Colab v5e TPU
-# Optimized for high-throughput training on v5e with 8 chips
+# Optimized for high-throughput training on v5e with single chip
 # Full BF16 precision (no ternary quantization)
 
 model:
@@ -39,13 +39,13 @@ training:
   # ============================================================================
   # BATCHING & MEMORY STRATEGY FOR v5e TPU
   # ============================================================================
-  # v5e: 16GB per chip, 8 chips = ~128GB total
-  # 500M model in BF16 ≈ 1GB, leaving ~127GB for activations/gradients
-  batch_size: 48                 # Per-chip batch size (conservative)
+  # v5e: 16GB per chip, 1 chip = 16GB total
+  # 500M model in BF16 ≈ 1GB, leaving ~13GB for activations/gradients
+  batch_size: 8                  # Per-chip batch size (conservative)
   gradient_accumulation_steps: 1 # No accumulation needed
   sequence_length: 512           # Token length
   
-  # Effective batch: 48 × 1 × 512 = 24,576 tokens/step (excellent for convergence)
+  # Effective batch: 8 × 1 × 512 = 4,096 tokens/step (excellent for convergence)
   
   # ============================================================================
   # TERNARY SETTINGS (DISABLED FOR FULL BF16)

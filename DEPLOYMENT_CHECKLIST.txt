@@ -19,7 +19,6 @@ Configuration:
 
 Training Scripts:
   [✓] train_v5e_complete.py   - Main script (24KB)
-  [✓] train_v5e.py            - Framework skeleton (18KB)
 
 Colab Integration:
   [✓] colab_train_v5e.ipynb   - Jupyter notebook (6.5KB)

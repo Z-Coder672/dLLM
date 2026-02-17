@@ -664,8 +664,18 @@ def _get_tokenizer():
     return tiktoken.get_encoding("gpt2")
 
 
+def _ensure_zstd():
+    """Ensure zstandard is available (needed by some HF datasets)."""
+    try:
+        import zstandard  # noqa: F401
+    except ImportError:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "zstandard"])
+
+
 def _load_hf_dataset(dataset_name, dataset_config=None, split="train", shuffle_buffer=10000, seed=42):
     """Load a single HuggingFace dataset with streaming."""
+    _ensure_zstd()
     from datasets import DownloadConfig, load_dataset
     import os
 

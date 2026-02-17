@@ -8,12 +8,16 @@ DEST="/content/dLLM"
 echo "=== v5e TPU Training Setup ==="
 echo ""
 
-# Download only the files needed for v5e training
-echo "Downloading training files from GitHub..."
-mkdir -p "$DEST/configs"
-curl -fsSL "$REPO/train_v5e_complete.py" -o "$DEST/train_v5e_complete.py"
-curl -fsSL "$REPO/configs/v5e.yaml"       -o "$DEST/configs/v5e.yaml"
-echo "Downloaded train_v5e_complete.py and configs/v5e.yaml"
+# Clone the repo (or pull if it already exists)
+if [ -d "$DEST/.git" ]; then
+  echo "Repo exists, pulling latest..."
+  cd "$DEST" && git fetch origin && git reset --hard origin/v5e-tpu-training
+else
+  echo "Cloning repo..."
+  rm -rf "$DEST"
+  git clone --branch v5e-tpu-training --single-branch https://github.com/Z-Coder672/dLLM.git "$DEST"
+fi
+echo "Got latest code from v5e-tpu-training branch"
 
 # Install JAX for TPU
 echo ""

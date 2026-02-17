@@ -580,11 +580,16 @@ def list_checkpoints(output_dir: str) -> list:
     """List all checkpoints."""
     path = Path(output_dir)
     if not path.exists():
+        logger.info(f"Checkpoint dir does not exist: {path}")
         return []
     
     checkpoints = []
-    for item in sorted(path.iterdir()):
-        if item.is_dir() and (item / "state.json").exists():
+    items = sorted(path.iterdir())
+    logger.info(f"Scanning {path}: found {len(items)} items: {[i.name for i in items]}")
+    for item in items:
+        has_state = item.is_dir() and (item / "state.json").exists()
+        logger.info(f"  {item.name}: is_dir={item.is_dir()}, has_state.json={has_state}")
+        if has_state:
             with open(item / "state.json") as f:
                 state = json.load(f)
             checkpoints.append({

@@ -498,7 +498,11 @@ def unflatten_dict(d: Dict[str, Any], dtype=None) -> Dict[str, Any]:
                 current[part] = {}
             current = current[part]
         if isinstance(value, np.ndarray):
-            arr = jnp.array(value)
+            if value.dtype.kind == 'V' and value.dtype.itemsize == 2:
+                value = np.frombuffer(value.tobytes(), dtype=np.uint16).reshape(value.shape)
+                arr = jnp.array(value).view(jnp.bfloat16)
+            else:
+                arr = jnp.array(value)
             current[parts[-1]] = arr.astype(dtype) if dtype is not None else arr
         else:
             current[parts[-1]] = value

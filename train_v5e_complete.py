@@ -641,6 +641,17 @@ def prune_checkpoints(output_dir: str, current_step: int, save_interval: int):
         path = ckpt["path"]
         if path not in keep_paths:
             try:
+                # On Google Drive FUSE mounts, shutil.rmtree sends files
+                # to Drive Trash.  Truncate every file to 0 bytes first
+                # so that even if they land in Trash they consume no quota.
+                for root, dirs, files in os.walk(path):
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        try:
+                            with open(fpath, 'wb') as f:
+                                f.truncate(0)
+                        except OSError:
+                            pass
                 shutil.rmtree(path)
                 logger.info(f"Pruned checkpoint: {path}")
             except Exception as e:
@@ -876,6 +887,8 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--auto-resume", action="store_true", help="Auto-resume from latest")
     args = parser.parse_args()
+    
+    logger.info("train_v5e_complete.py — v2 (fixed checkpoint deletion: truncate before rmtree)")
     
     # Setup Google Drive
     setup_google_drive()

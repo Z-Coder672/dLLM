@@ -33,7 +33,7 @@ training:
   # ============================================================================
   lr_schedule: "cosine"          # Cosine annealing with warmup
   warmup_steps: 2000             # 2k steps warmup
-  max_steps: 1000000             # Indefinite training (stop manually)
+  max_steps: 500000             # Indefinite training (stop manually)
   stop_steps: 0                  # Disabled
   
   # ============================================================================

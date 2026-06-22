@@ -2051,7 +2051,29 @@ def main():
     # Create output directory
     output_dir = training_config['output_dir']
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
+
+    # Persistent XLA compilation cache. The fused train_step is a large graph
+    # (value_and_grad over a lax.scan of n_layers rematerialized blocks + a
+    # chunked CE); its first compile can take ~minutes. Caching the compiled
+    # executable to disk means every later (re)launch — frequent on Colab, which
+    # disconnects often — loads it instead of recompiling, so a resume starts
+    # training almost immediately. Defaults to `<output_dir>/compile_cache` (on
+    # the Drive mount, so it survives a runtime reset); set `compile_cache_dir`
+    # to "" to disable, or to another path. The cache only helps once ONE compile
+    # has completed and been written, so the first run still pays full compile.
+    cache_dir = training_config.get("compile_cache_dir", "__default__")
+    if cache_dir == "__default__":
+        cache_dir = str(Path(output_dir) / "compile_cache")
+    if cache_dir:
+        try:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            jax.config.update("jax_compilation_cache_dir", cache_dir)
+            jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
+            jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+            logger.info(f"XLA compile cache: {cache_dir}")
+        except Exception as e:
+            logger.warning(f"Could not enable compile cache ({e}); compiling fresh.")
+
     # Device visibility: this script is single-device (jit, no pmap/sharding) —
     # make that an explicit, logged choice rather than a silent one.
     logger.info(

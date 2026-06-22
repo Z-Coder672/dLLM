@@ -97,7 +97,7 @@ def build(args):
     )
     model = TransformerModel(model_config, jax.random.PRNGKey(0))
     model.ce_chunk_size = args.ce_chunk
-    model.remat_blocks = True
+    model.remat_blocks = args.remat
     # f32 master, exactly like main().
     model.params = jax.tree_util.tree_map(lambda p: p.astype(jnp.float32), model.params)
     opt = AdamWOptimizer(beta1=0.9, beta2=0.98, eps=1e-8, weight_decay=0.01)
@@ -107,7 +107,7 @@ def build(args):
     print(f"Params: {n/1e6:.1f}M | tie_embeddings={args.tie} | "
           f"layers={args.layers} d_model={args.d_model} | "
           f"batch={args.batch} seq={args.seq} accum={args.accum} "
-          f"ce_chunk={args.ce_chunk}")
+          f"ce_chunk={args.ce_chunk} remat={args.remat}")
     return model, opt, decay_mask
 
 
@@ -329,9 +329,25 @@ def main():
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--tie", action="store_true", default=True)
     ap.add_argument("--no-tie", dest="tie", action="store_false")
+    ap.add_argument("--remat", action="store_true", default=True,
+                    help="rematerialize transformer blocks (default; matches the trainer)")
+    ap.add_argument("--no-remat", dest="remat", action="store_false",
+                    help="disable block remat — ~half the backward graph (faster compile, "
+                         "more activation memory); use to test if batch fits without remat")
+    ap.add_argument("--cache-dir", type=str, default=None,
+                    help="persistent XLA compile cache dir (e.g. a Drive path). Once one "
+                         "compile lands, reruns load it from disk instead of recompiling.")
     ap.add_argument("--skip-attn", action="store_true",
                     help="skip the Q3 attention micro-benchmark")
     args = ap.parse_args()
+
+    if args.cache_dir:
+        # Persist compiled executables across runs: the (slow) first compile is
+        # written here and later runs load it instead of recompiling.
+        jax.config.update("jax_compilation_cache_dir", args.cache_dir)
+        jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+        print(f"Compile cache: {args.cache_dir}")
 
     print(f"JAX {jax.__version__} | backend={jax.default_backend()} | "
           f"devices={jax.device_count()}")

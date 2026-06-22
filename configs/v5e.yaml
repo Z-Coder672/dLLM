@@ -156,7 +156,11 @@ training:
       weight: 0.2                # 20% synthetic educational data
     - name: "mlfoundations/dclm-baseline-1.0"
       weight: 0.4                # 40% curated web data
-    - name: "bigcode/starcoderdata"
+    - name: "codeparrot/github-code-clean"
+      config: "all-all"          # Non-gated raw GitHub source, 32 langs, ~1TB, `code` text
+                                  # field. Replaces gated bigcode/starcoderdata (needed HF auth
+                                  # + token re-paste each runtime). "all-all" = all licenses;
+                                  # use "all-mit"/"all-apache-2.0" for permissive-only (smaller).
       weight: 0.2                # 20% code data
     - name: "HuggingFaceFW/fineweb-edu"
       config: "sample-10BT"

@@ -205,6 +205,16 @@ class TransformerModel:
         # is chunked. Same memory/recompute lever as the chunked CE. Overridden
         # from training config in `main`.
         self.remat_blocks = True
+        # Compile the depth as ONE lax.scan over stacked per-layer params instead
+        # of a Python loop that unrolls all n_layers blocks into the graph. XLA
+        # then compiles a single block body, so compile time is ~constant in depth
+        # — an unrolled 24-layer fwd+bwd+remat graph can take 20+ min to compile
+        # and blow past a runtime compile-timeout. Numerically identical (same
+        # blocks, same order, same per-layer init values — just stacked). CHANGES
+        # THE PARAM TREE (`layer_i` dicts -> one stacked `layers` dict), so it's
+        # gated and defaults OFF to keep existing checkpoints resumable; turn on
+        # for fresh runs. Overridden from model config in __init__ below.
+        self.scan_layers = model_config.get('scan_layers', False)
 
         self.params = self._init_params(key)
     
@@ -220,10 +230,22 @@ class TransformerModel:
             dtype=self.dtype
         ) * 0.02
         
-        # Transformer layers
-        for layer_idx in range(self.n_layers):
-            params[f'layer_{layer_idx}'] = self._init_layer(key, layer_idx)
-            key, _ = jax.random.split(key)
+        # Transformer layers. With scan_layers, build each layer then STACK them
+        # into a single `layers` dict of (n_layers, *shape) arrays so backbone can
+        # lax.scan one block over the depth — identical per-layer init values to
+        # the unrolled path, just stacked. Otherwise keep separate layer_i entries.
+        if self.scan_layers:
+            layer_list = []
+            for layer_idx in range(self.n_layers):
+                layer_list.append(self._init_layer(key, layer_idx))
+                key, _ = jax.random.split(key)
+            params['layers'] = jax.tree_util.tree_map(
+                lambda *ls: jnp.stack(ls), *layer_list
+            )
+        else:
+            for layer_idx in range(self.n_layers):
+                params[f'layer_{layer_idx}'] = self._init_layer(key, layer_idx)
+                key, _ = jax.random.split(key)
         
         # Final norm and output projection. When tying, the output head is
         # embed.T (added in forward), so no separate lm_head parameter exists.
@@ -296,15 +318,27 @@ class TransformerModel:
         # Process through transformer blocks. With remat_blocks, each block is
         # rematerialized: backward recomputes the block's forward instead of
         # keeping its activations live across all n_layers (see __init__).
-        block_fn = (
-            jax.checkpoint(self._transformer_block)
-            if self.remat_blocks
-            else self._transformer_block
-        )
-        for layer_idx in range(self.n_layers):
-            x = block_fn(
-                x, params[f'layer_{layer_idx}'], cos_emb, sin_emb, causal_mask
+        if self.scan_layers:
+            # Single lax.scan over the stacked per-layer params: XLA compiles ONE
+            # block body (compile ~constant in depth) and the scan threads x
+            # through every layer. remat wraps the scanned body so backward
+            # recomputes one block at a time (same memory lever as the loop).
+            def _scan_block(x, layer_params):
+                return self._transformer_block(
+                    x, layer_params, cos_emb, sin_emb, causal_mask
+                ), None
+            body = jax.checkpoint(_scan_block) if self.remat_blocks else _scan_block
+            x, _ = lax.scan(body, x, params['layers'])
+        else:
+            block_fn = (
+                jax.checkpoint(self._transformer_block)
+                if self.remat_blocks
+                else self._transformer_block
             )
+            for layer_idx in range(self.n_layers):
+                x = block_fn(
+                    x, params[f'layer_{layer_idx}'], cos_emb, sin_emb, causal_mask
+                )
 
         # Final norm: (batch, seq_len, d_model). Reduce in f32 — a bf16 mean over
         # d_model loses precision (same reason softmax/loss run in f32).

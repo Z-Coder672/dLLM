@@ -93,7 +93,7 @@ def build(args):
     model_config = dict(
         d_model=args.d_model, n_layers=args.layers, n_heads=args.heads,
         d_ff=args.d_ff, vocab_size=args.vocab, max_seq_len=args.seq,
-        rope_theta=10000.0, tie_embeddings=args.tie,
+        rope_theta=10000.0, tie_embeddings=args.tie, scan_layers=args.scan_layers,
     )
     model = TransformerModel(model_config, jax.random.PRNGKey(0))
     model.ce_chunk_size = args.ce_chunk
@@ -107,7 +107,7 @@ def build(args):
     print(f"Params: {n/1e6:.1f}M | tie_embeddings={args.tie} | "
           f"layers={args.layers} d_model={args.d_model} | "
           f"batch={args.batch} seq={args.seq} accum={args.accum} "
-          f"ce_chunk={args.ce_chunk} remat={args.remat}")
+          f"ce_chunk={args.ce_chunk} remat={args.remat} scan_layers={args.scan_layers}")
     return model, opt, decay_mask
 
 
@@ -334,6 +334,11 @@ def main():
     ap.add_argument("--no-remat", dest="remat", action="store_false",
                     help="disable block remat — ~half the backward graph (faster compile, "
                          "more activation memory); use to test if batch fits without remat")
+    ap.add_argument("--scan-layers", action="store_true", default=True,
+                    help="compile the depth as one lax.scan (default; ~constant-in-depth "
+                         "compile — matches the fresh config)")
+    ap.add_argument("--no-scan-layers", dest="scan_layers", action="store_false",
+                    help="unroll all layers into the graph (the old, slow-to-compile path)")
     ap.add_argument("--cache-dir", type=str, default=None,
                     help="persistent XLA compile cache dir (e.g. a Drive path). Once one "
                          "compile lands, reruns load it from disk instead of recompiling.")

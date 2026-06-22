@@ -14,6 +14,13 @@ model:
   dropout: 0.0                   # No dropout for pre-training
   rope_theta: 10000.0           # Standard RoPE theta
   dtype: bfloat16
+  scan_layers: true              # Compile the depth as ONE lax.scan over stacked layer
+                                  # params (XLA compiles a single block body) instead of
+                                  # unrolling all 24 blocks into the graph. Cuts the fused
+                                  # train_step compile from 20+ min to ~seconds; numerically
+                                  # identical. CHANGES THE PARAM TREE (layer_i -> stacked
+                                  # `layers`), so FRESH RUNS ONLY — flip to false to resume an
+                                  # unrolled-layout checkpoint.
   tie_embeddings: true           # Output head = token embedding (logits = x @ embed.T),
                                   # saving ~vocab*d_model (~51M, ~13%) params and usually
                                   # helping small-model quality. ON for this fresh run.

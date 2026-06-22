@@ -207,8 +207,22 @@ def run_throughput_and_q1_q2(args):
                 jax.tree_util.tree_map(jnp.asarray, host_m),
                 jax.tree_util.tree_map(jnp.asarray, host_v), 0)
 
-    def time_step(step_fn, b):
-        # Re-feed the chained state so donation is satisfied each iteration.
+    def time_step(step_fn, b, label):
+        # First call triggers the (heavy) XLA compile: value_and_grad over a
+        # lax.scan of 24 rematerialized blocks + chunked CE. This can take
+        # SEVERAL MINUTES on the full graph with no output — report it so a long
+        # compile isn't mistaken for a hang.
+        print(f"  compiling [{label}] (first fused-step build — can take "
+              f"minutes on the full 24-layer graph)...", flush=True)
+        p, m, v, t = fresh()
+        tc = time.time()
+        _block(step_fn(p, m, v, t, lr, b))
+        print(f"  [{label}] compiled in {time.time()-tc:.1f}s; timing "
+              f"{args.steps} steps...", flush=True)
+        # One more warm run, then time on fresh state (donated buffers are spent).
+        p, m, v, t = fresh()
+        _block(step_fn(p, m, v, t, lr, b))
+
         state = {"s": fresh()}
 
         def once():
@@ -216,25 +230,19 @@ def run_throughput_and_q1_q2(args):
             p, m, v, t, loss, gn = step_fn(p, m, v, t, lr, b)
             state["s"] = (p, m, v, t)
             return loss
-        # Warm up (compile) on a throwaway fresh state, then time on another so
-        # the donated warmup buffers aren't reused.
-        for _ in range(2):
-            p, m, v, t = fresh()
-            _block(step_fn(p, m, v, t, lr, b))
-        state["s"] = fresh()
         t0 = time.time()
         for _ in range(args.steps):
             _block(once())
         return (time.time() - t0) / args.steps
 
     # Real fused step (== main): tok/s + peak HBM.
-    guard_sec = time_step(step_guard, batch)
+    guard_sec = time_step(step_guard, batch, "scan+guard")
     report_mem(f"after {args.steps} guarded steps")
     print(f"  REAL step (scan+guard): {guard_sec*1e3:.1f} ms/step | "
           f"{tok_per_step/guard_sec:,.0f} tok/s")
 
     # Q1: same minus the where-guard.
-    sec_ng = time_step(step_noguard, batch)
+    sec_ng = time_step(step_noguard, batch, "no-guard")
     print(f"  Q1 no-guard step:       {sec_ng*1e3:.1f} ms/step | "
           f"{tok_per_step/sec_ng:,.0f} tok/s")
     dq1 = (guard_sec - sec_ng) / guard_sec * 100
@@ -244,7 +252,7 @@ def run_throughput_and_q1_q2(args):
     # Q2: only meaningful at accum==1 (scan length 1 vs no scan).
     if args.accum == 1:
         single = {"input_ids": batch["input_ids"][0], "labels": batch["labels"][0]}
-        sec_ns = time_step(step_noscan, single)
+        sec_ns = time_step(step_noscan, single, "no-scan")
         print(f"  Q2 no-scan step:        {sec_ns*1e3:.1f} ms/step | "
               f"{tok_per_step/sec_ns:,.0f} tok/s")
         dq2 = (guard_sec - sec_ns) / guard_sec * 100

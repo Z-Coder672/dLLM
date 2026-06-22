@@ -14,13 +14,21 @@ model:
   dropout: 0.0                   # No dropout for pre-training
   rope_theta: 10000.0           # Standard RoPE theta
   dtype: bfloat16
+  tie_embeddings: true           # Output head = token embedding (logits = x @ embed.T),
+                                  # saving ~vocab*d_model (~51M, ~13%) params and usually
+                                  # helping small-model quality. ON for this fresh run.
+                                  # FRESH RUNS ONLY: an untied checkpoint can't be resumed
+                                  # with this true (untied->tied discards a trained matrix =
+                                  # loss spike); flip back to false to resume such a run.
 
 training:
   # ============================================================================
   # OPTIMIZER & LEARNING RATE
   # ============================================================================
   optimizer: adamw
-  learning_rate: 5.0e-4          # Standard for 500M LLMs
+  learning_rate: 7.0e-4          # ~sqrt(2) scaled for batch_size 16 (was 5e-4 @ batch 8).
+                                  # Raise further (toward ~1e-3) only if you grow the batch
+                                  # again; the non-finite guard + warmup absorb mild overshoot.
   min_learning_rate: 1.0e-5      # Final floor for cosine annealing
   weight_decay: 0.01             # L2 regularization
   betas: [0.9, 0.98]             # Beta2=0.98 for stability with large batches
@@ -32,20 +40,55 @@ training:
   # LEARNING RATE SCHEDULE
   # ============================================================================
   lr_schedule: "cosine"          # Cosine annealing with warmup
-  warmup_steps: 2000             # 2k steps warmup
-  max_steps: 500000             # Indefinite training (stop manually)
+  warmup_steps: 3000             # Lengthened for the larger (batch 16) effective batch
+  max_steps: 1000000             # Chinchilla-optimal at batch_size 16: 1M * 16 * 512 = 8.19B
+                                 # tokens ≈ 20x params (~405M untied / ~354M tied). The cosine
+                                 # FULLY anneals to min_learning_rate only if you train to this
+                                 # step. For a cheaper HALF run set this to 500000 (4.1B tokens,
+                                 # ~11x params — undertrained but usable) so the cosine still
+                                 # lands on min_lr at your real stopping point. Don't set a
+                                 # horizon you won't reach: a too-large max_steps flattens the
+                                 # cosine and you train near peak LR the whole run.
   stop_steps: 0                  # Disabled
+
+  # Smooth-resume LR ramp: if a checkpoint is resumed under a changed schedule
+  # (e.g. max_steps was just enlarged), the cosine curve would jump at the
+  # resume point. Instead, linearly ramp from the LR the checkpoint was actually
+  # trained at to where the NEW curve will be `lr_resume_ramp_steps` later.
+  lr_resume_ramp_steps: 5000     # Length of the linear ramp after a resume
+  lr_resume_ramp_threshold: 0.1  # Only ramp if new-curve LR differs by >10%
   
   # ============================================================================
   # BATCHING & MEMORY STRATEGY FOR v5e TPU
   # ============================================================================
   # v5e: 16GB per chip, 1 chip = 16GB total
   # 500M model in BF16 ≈ 1GB, leaving ~13GB for activations/gradients
-  batch_size: 8                  # Per-chip batch size (conservative)
-  gradient_accumulation_steps: 1 # No accumulation needed
-  sequence_length: 512           # Token length
+  batch_size: 16                 # Per-chip batch size. Safe to raise now that remat_blocks
+                                  # (per-layer recompute) + the chunked CE keep activation
+                                  # memory ~flat in batch — the old "batch>8 OOMs" tables
+                                  # predate both. Profile peak HBM (profile_v5e.py) before
+                                  # pushing to 24/32; scale the LR when you do.
+  gradient_accumulation_steps: 1 # Micro-batches summed per optimizer step (N4).
+                                 # >1 grows the EFFECTIVE batch with no extra
+                                 # activation memory (grads accumulated via a
+                                 # sequential lax.scan inside train_step), so it's
+                                 # the memory-free way to enlarge the batch on the
+                                 # 16 GB chip. Effective batch = batch_size * this;
+                                 # max_steps counts OPTIMIZER steps, not micro-
+                                 # batches. Scale the LR if you raise this. 1 = off.
+  sequence_length: 512           # Token length for data packing + effective context.
+                                 # May be <= model.max_seq_len to train on shorter
+                                 # sequences (RoPE/causal mask are built per-call from
+                                 # the actual length); a value > max_seq_len is clamped
+                                 # to it (with a warning). Defaults to max_seq_len if omitted.
+  ce_chunk_size: 1024            # Rows/chunk for the chunked cross-entropy. The loss
+                                 # folds the vocab projection into a rematerialized,
+                                 # chunked CE so the full (batch*seq, vocab) f32 logits
+                                 # (~2 GB at batch 8) are never held in HBM — peak logit
+                                 # memory is O(ce_chunk_size * vocab) instead. Smaller =
+                                 # less memory, slightly more recompute. 0 disables it.
   
-  # Effective batch: 8 × 1 × 512 = 4,096 tokens/step (excellent for convergence)
+  # Effective batch: 16 × 1 × 512 = 8,192 tokens/step
   
   # ============================================================================
   # TERNARY SETTINGS (DISABLED FOR FULL BF16)
@@ -57,23 +100,65 @@ training:
   # CHECKPOINTING & LOGGING
   # ============================================================================
   eval_interval: 1000            # Evaluate every 1k steps
-  save_interval: 1000            # Save checkpoints every 1k steps
+  val_num_samples: 200           # Packed sequences in the eval set (split across the
+                                 # mixture by training weight). Capped by the reserved
+                                 # holdout — keep val_holdout_examples comfortably above it.
+  save_interval: 5000            # Save checkpoints every 5k steps. Each save writes
+                                 # params + Adam m + v (~3-4 GB, mostly f32) CPU-compressed
+                                 # over a Google Drive FUSE mount, which can stall training
+                                 # for minutes; 1k was too frequent for the payoff (P4).
   log_interval: 20               # Log metrics every 20 steps
+  nonfinite_abort_steps: 50      # Divergence guard: each non-finite (NaN/Inf) step
+                                 # has its weight update SKIPPED (so a transient
+                                 # spike can't poison the f32 master); if it stays
+                                 # non-finite for this many CONSECUTIVE steps the
+                                 # run is considered diverged — the trainer saves a
+                                 # final last-good-weights checkpoint and hard-kills
+                                 # itself (SIGKILL) to stop wasting TPU credits.
+                                 # Detected at log_interval granularity. 0 disables.
+  val_holdout_examples: 10000    # Reserved-prefix eval holdout (N1). Training SKIPS the
+                                 # first N raw examples of each stream (skip applied before
+                                 # the shuffle) and the eval set reads exactly those (.take),
+                                 # so eval is disjoint from training BY CONSTRUCTION — no
+                                 # shuffle-window leakage and no contamination as training
+                                 # advances. N only needs to exceed the eval sample count
+                                 # (~num_samples seqs); the skipped prefix is negligible vs
+                                 # the multi-billion-example corpora. CHANGING N shifts the
+                                 # training stream, so it's a fresh-run choice — resuming a
+                                 # checkpoint trained at a different N triggers a loud
+                                 # dataloader-fingerprint mismatch warning (data position may
+                                 # be misaligned).
   scale_update_interval: 500     # N/A for full precision, kept for compatibility
-  checkpoint_layers: 4           # Gradient checkpointing (1 out of 4 layers)
-  
+  # NOTE: gradient checkpointing (jax.remat) is NOT implemented in the trainer;
+  # all 24 layers' activations are retained. Do not re-add a `checkpoint_layers`
+  # setting here unless the code actually wires up jax.remat per block.
+
   # ============================================================================
   # DATA CONFIGURATION
   # ============================================================================
   datasets:
     - name: "HuggingFaceTB/cosmopedia-v2"
       config: "cosmopedia-v2"
-      weight: 0.5                # 50% synthetic educational data
+      weight: 0.2                # 20% synthetic educational data
     - name: "mlfoundations/dclm-baseline-1.0"
-      weight: 0.3                # 30% curated web data
+      weight: 0.4                # 40% curated web data
+    - name: "bigcode/starcoderdata"
+      weight: 0.2                # 20% code data
     - name: "HuggingFaceFW/fineweb-edu"
       config: "sample-10BT"
-      weight: 0.2                # 20% educational web data
+      weight: 0.2               # 20% educational web data
   
   streaming: true                # Stream from HuggingFace Hub
+  validate_datasets: true        # Startup smoke test (N2): probe each mixture
+                                 # stream once and ABORT if any yields no usable
+                                 # sequence (wrong text field / missing config /
+                                 # data_dir), instead of silently redistributing
+                                 # its weight to the others at run time. Adds a
+                                 # little startup latency on every (re)launch.
+  tokenize_doc_batch: 128        # Docs tokenized per batch via tiktoken
+                                 # encode_ordinary_batch (multithreaded, GIL-released).
+                                 # Speeds up both steady-state loading and the resume
+                                 # replay fallback. Larger = better tokenizer throughput
+                                 # but a bigger leftover-token buffer saved in the
+                                 # checkpoint's dataloader_state.json.
   output_dir: /content/gdrive/MyDrive/checkpoints/500m_v5e

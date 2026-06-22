@@ -161,7 +161,11 @@ training:
                                   # field. Replaces gated bigcode/starcoderdata (needed HF auth
                                   # + token re-paste each runtime). "all-all" = all licenses;
                                   # use "all-mit"/"all-apache-2.0" for permissive-only (smaller).
-      weight: 0.2                # 20% code data
+      weight: 0.13               # 13% raw source code
+    - name: "OpenCoder-LLM/opc-fineweb-code-corpus"
+      weight: 0.07               # 7% code-related web text (`text` field; MIT). From OpenCoder's
+                                  # pretraining recipe — code in prose (tutorials/docs/explained
+                                  # code), complements raw source. Non-gated, inline text.
     - name: "HuggingFaceFW/fineweb-edu"
       config: "sample-10BT"
       weight: 0.2               # 20% educational web data

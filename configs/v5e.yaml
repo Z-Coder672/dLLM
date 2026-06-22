@@ -94,7 +94,14 @@ training:
                                  # (~2 GB at batch 8) are never held in HBM — peak logit
                                  # memory is O(ce_chunk_size * vocab) instead. Smaller =
                                  # less memory, slightly more recompute. 0 disables it.
-  
+  remat_blocks: true             # REQUIRED — do not turn off. Measured on v5e (batch 16,
+                                 # scan_layers): remat ON = 8.54 GB peak, 32.5k tok/s;
+                                 # remat OFF = OOM at 24 GB. With scan_layers the scan must
+                                 # keep ALL 24 layers' activations live for backward unless
+                                 # each block is rematerialized — the f32[24,16,16,512,512]
+                                 # attention-score tensor alone is 6 GB. Recompute cost is
+                                 # already in the 32.5k tok/s number (5.4x the old 6k).
+
   # Effective batch: 16 × 1 × 512 = 8,192 tokens/step
   
   # ============================================================================

@@ -156,16 +156,18 @@ training:
       weight: 0.2                # 20% synthetic educational data
     - name: "mlfoundations/dclm-baseline-1.0"
       weight: 0.4                # 40% curated web data
-    - name: "codeparrot/github-code-clean"
-      config: "all-all"          # Non-gated raw GitHub source, 32 langs, ~1TB, `code` text
-                                  # field. Replaces gated bigcode/starcoderdata (needed HF auth
-                                  # + token re-paste each runtime). "all-all" = all licenses;
-                                  # use "all-mit"/"all-apache-2.0" for permissive-only (smaller).
-      weight: 0.13               # 13% raw source code
+    # Code slice (20%) — both non-gated AND script-free. NOTE: datasets 3.x removed
+    # Python loader scripts, which killed codeparrot/github-code-clean (it ships a
+    # .py loader: "Dataset scripts are no longer supported") and all gated
+    # SWHID-only sets (the-stack-v2/stack-edu) need S3 fetches. These two are from
+    # OpenCoder's open recipe, ship inline `text`, and stream directly.
+    - name: "OpenCoder-LLM/opc-annealing-corpus"
+      config: "algorithmic_corpus"  # Real algorithmic source code from The Stack v2, re-hosted
+                                      # as JSON `text` (streams without S3/SWHID). Non-gated.
+      weight: 0.1                # 10% real source code
     - name: "OpenCoder-LLM/opc-fineweb-code-corpus"
-      weight: 0.07               # 7% code-related web text (`text` field; MIT). From OpenCoder's
-                                  # pretraining recipe — code in prose (tutorials/docs/explained
-                                  # code), complements raw source. Non-gated, inline text.
+      weight: 0.1                # 10% code-related web text (tutorials/docs/explained code), MIT,
+                                  # parquet. Complements raw source with code-in-prose.
     - name: "HuggingFaceFW/fineweb-edu"
       config: "sample-10BT"
       weight: 0.2               # 20% educational web data

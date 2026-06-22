@@ -185,4 +185,9 @@ training:
                                  # replay fallback. Larger = better tokenizer throughput
                                  # but a bigger leftover-token buffer saved in the
                                  # checkpoint's dataloader_state.json.
-  output_dir: /content/gdrive/MyDrive/checkpoints/500m_v5e
+  output_dir: /content/gdrive/MyDrive/checkpoints/500m_v5e_scan
+                                 # FRESH dir for the new architecture (scan_layers + tied).
+                                 # The old .../500m_v5e holds incompatible-param-tree
+                                 # checkpoints from prior runs: sharing it would make
+                                 # --auto-resume load an old checkpoint (KeyError at forward)
+                                 # and polluted the log-spaced prune (see prune_checkpoints).

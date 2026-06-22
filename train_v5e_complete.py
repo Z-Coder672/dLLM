@@ -1151,37 +1151,53 @@ def get_latest_checkpoint(output_dir: str) -> Optional[str]:
 
 
 def prune_checkpoints(output_dir: str, current_step: int, save_interval: int):
-    """Prune old checkpoints using log-spaced thinning."""
+    """Prune old checkpoints using log-spaced thinning.
+
+    Only checkpoints from THIS run's timeline (``step <= current_step``) are ever
+    thinned. A shared ``output_dir`` can also hold checkpoints with a *higher*
+    step than ``current_step`` — left by a previous, further-along run (e.g. a
+    fresh run started into an old dir). Those must be left ENTIRELY alone: the old
+    code did ``age = max(0, current_step - step)``, which clamped a future
+    checkpoint's age to 0 → bucket 0, then ``max(..., key=step)`` crowned it
+    "latest" and the log-spacing happily deleted the run's OWN just-saved
+    checkpoint (e.g. saved step_15000, then immediately pruned it because a stale
+    step_100000 existed). Excluding ``step > current_step`` from both the keep
+    set and the delete loop fixes that and never touches a foreign run's data.
+    """
     checkpoints = list_checkpoints(output_dir)
-    if not checkpoints or save_interval <= 0:
+    if save_interval <= 0:
         return
-    
+    # Restrict to this run's timeline; higher-step checkpoints are another run's
+    # and are neither thinned nor counted (so they can't masquerade as "latest").
+    prunable = [c for c in checkpoints if c["step"] <= current_step]
+    if not prunable:
+        return
+
     keep_paths = set()
     bucket_best = {}
-    
-    for ckpt in checkpoints:
+
+    for ckpt in prunable:
         step = ckpt["step"]
         path = ckpt["path"]
         age = max(0, current_step - step)
-        
+
         if age < save_interval:
             bucket = 0
         else:
             bucket = int(math.floor(math.log(age / save_interval, 2.0)))
         best = bucket_best.get(bucket)
-        
+
         if best is None or step > best[0]:
             bucket_best[bucket] = (step, path)
-    
-    # Always keep the latest checkpoint
-    if checkpoints:
-        latest = max(checkpoints, key=lambda c: c["step"])
-        keep_paths.add(latest["path"])
-    
+
+    # Always keep the latest checkpoint of this run's timeline.
+    latest = max(prunable, key=lambda c: c["step"])
+    keep_paths.add(latest["path"])
+
     for _, path in bucket_best.values():
         keep_paths.add(path)
-    
-    for ckpt in checkpoints:
+
+    for ckpt in prunable:
         path = ckpt["path"]
         # "final" marks a completed run — never prune it (a later resumed run's
         # buckets would otherwise happily discard it).

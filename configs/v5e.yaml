@@ -48,15 +48,13 @@ training:
   # ============================================================================
   lr_schedule: "cosine"          # Cosine annealing with warmup
   warmup_steps: 3000             # Lengthened for the larger (batch 16) effective batch
-  max_steps: 875000              # Pulled in from 1M to match the unit budget: at ~2.1e-4
-                                 # units/step the remaining balance (~141 units @ step 243k)
-                                 # can't reach 1M (~161 needed) — it'd run dry ~905k with the
-                                 # LR not fully annealed and no clean final save. 875k lands the
-                                 # cosine on min_lr at an affordable step (~135 units from 243k),
-                                 # so the late-anneal loss drop actually happens within budget
-                                 # and the run finishes clean (7.2B tokens, ~20x params — still
-                                 # Chinchilla-optimal). Applies on the next --auto-resume; the
-                                 # LR shift is <10% so no resume-ramp, just a smooth continuation.
+  max_steps: 1000000             # Full Chinchilla run: 1M * 16 * 512 = 8.19B tokens ≈ 20-23x
+                                 # params. Cosine anneals to min_learning_rate at this step.
+                                 # NOTE: the current unit balance (~141 @ step 243k) can't reach
+                                 # 1M (~161 needed at ~2.1e-4 units/step) — the plan is to pause
+                                 # when units run low and resume next month on the +100-unit
+                                 # refill via --auto-resume. The latest checkpoint + dataloader
+                                 # state restore exactly, so the run continues to 1M then.
   stop_steps: 0                  # Disabled
 
   # Smooth-resume LR ramp: if a checkpoint is resumed under a changed schedule

@@ -32,7 +32,7 @@ import jax.numpy as jnp
 from train_v5e_complete import TransformerModel, unflatten_dict, _get_tokenizer
 
 
-def load_model(ckpt_dir):
+def load_model(ckpt_dir, dtype=jnp.bfloat16):
     ckpt = Path(ckpt_dir)
     with open(ckpt / "model_config.json") as f:
         mcfg = json.load(f)
@@ -41,7 +41,10 @@ def load_model(ckpt_dir):
     model = TransformerModel(mcfg, jax.random.PRNGKey(0))
     model.remat_blocks = False  # inference: no backward pass to rematerialize
     params_flat = dict(np.load(ckpt / "params.npz"))
-    model.params = unflatten_dict(params_flat, dtype=jnp.float32)
+    # Default bf16: params are stored f32 (the optimizer master), but the forward
+    # ran in bf16 throughout training, so bf16 inference is faithful AND halves the
+    # weight memory (~1.4 GB f32 -> ~0.7 GB). Pass dtype=f32 for an exact master.
+    model.params = unflatten_dict(params_flat, dtype=dtype)
     return model, mcfg
 
 
@@ -53,9 +56,13 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.8, help="0 = greedy/argmax")
     ap.add_argument("--top-k", type=int, default=40, help="0 = no top-k")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dtype", choices=["bf16", "f32"], default="bf16",
+                    help="bf16 (default) halves weight RAM and matches the training forward")
     args = ap.parse_args()
 
-    model, mcfg = load_model(args.checkpoint)
+    model, mcfg = load_model(
+        args.checkpoint, dtype=jnp.bfloat16 if args.dtype == "bf16" else jnp.float32
+    )
     max_seq = int(mcfg.get("max_seq_len", 512))
     tok = _get_tokenizer()
     eot = tok.encode("<|endoftext|>", allowed_special={"<|endoftext|>"})[0]

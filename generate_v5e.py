@@ -20,6 +20,12 @@ Usage:
     # greedy / most-likely continuation:
     python3 generate_v5e.py --checkpoint .../step_70000 --prompt "def quicksort(arr):" --temperature 0
 """
+import os
+# Force CPU before importing jax: the jax-metal backend on Macs preallocates/leaks
+# Apple unified memory (a ~2.4 GB inference balloons to 13 GB+). CPU is fine for a
+# 353M model. Export JAX_PLATFORMS yourself to override.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
 import argparse
 import json
 from pathlib import Path

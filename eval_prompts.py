@@ -8,6 +8,13 @@ bf16 weights (~0.7 GB). Not chat — these are completion prefixes.
 Usage:
     python3 eval_prompts.py checkpoints/500m_scan/step_580000
 """
+import os
+# Force CPU BEFORE any jax import. On Macs the jax-metal backend preallocates
+# Apple unified memory and leaks — a ~2.4 GB inference balloons to 13 GB+ and can
+# OOM a 16 GB machine. CPU is plenty for a 353M model and stays ~2.4 GB. Override
+# by exporting JAX_PLATFORMS yourself if you really want Metal.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
 import sys
 import json
 import numpy as np
@@ -16,6 +23,8 @@ import jax.numpy as jnp
 
 # Importing from the repo works because this script lives in the repo dir.
 import train_v5e_complete as T
+
+print(f"jax backend: {jax.default_backend()}")
 
 CK = sys.argv[1] if len(sys.argv) > 1 else "checkpoints/500m_scan/step_580000"
 L = 96  # fixed buffer -> one forward compile; causal mask hides post-cursor padding
